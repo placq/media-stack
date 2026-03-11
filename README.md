@@ -13,26 +13,28 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 
 ## 📦 Services Included
 
-| Icon | Service | Description |
-| :--- | :--- | :--- |
-| 🎬 | **Jellyfin** | Media Server (Alternative to Plex/Emby) |
-| 🎫 | **Jellyseerr** | Request management for movies and TV shows |
-| 📥 | **Transmission** | BitTorrent client (protected by VPN) |
-| 🎥 | **Radarr** | Automatic movie downloader |
-| 📺 | **Sonarr** | Automatic TV show downloader |
-| 🔍 | **Prowlarr** | Indexer manager (integrates with Radarr/Sonarr) |
-| 📝 | **Bazarr** | Automatic subtitle downloader |
-| 🔄 | **WUD** | Updates notifier/updater for Docker containers |
-| 🛡️ | **Gluetun** | VPN client (OpenVPN/Wireguard) |
+| Icon | Service          | Description                                     |
+| :--- | :--------------- | :---------------------------------------------- |
+| 🎬   | **Jellyfin**     | Media Server (Alternative to Plex/Emby)         |
+| 🎫   | **Jellyseerr**   | Request management for movies and TV shows      |
+| 📥   | **Transmission** | BitTorrent client (protected by VPN)            |
+| 🎥   | **Radarr**       | Automatic movie downloader                      |
+| 📺   | **Sonarr**       | Automatic TV show downloader                    |
+| 🔍   | **Prowlarr**     | Indexer manager (integrates with Radarr/Sonarr) |
+| 📝   | **Bazarr**       | Automatic subtitle downloader                   |
+| 🔄   | **WUD**          | Updates notifier/updater for Docker containers  |
+| 🛡️   | **Gluetun**      | VPN client (OpenVPN/Wireguard)                  |
 
 ## 🛠️ Installation
 
 1. **Transfer the script to your server:**
+
    ```bash
    scp install_media.sh user@your-server-ip:/root/
    ```
 
 2. **Connect via SSH and run:**
+
    ```bash
    chmod +x install_media.sh
    ./install_media.sh
@@ -43,6 +45,7 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 ## 📂 Directory Structure
 
 The script creates a specialized structure for **Hardlinks**:
+
 ```text
 /opt/media-stack/
 ├── config/             # Configuration for all containers
@@ -53,6 +56,6 @@ The script creates a specialized structure for **Hardlinks**:
 
 ## ⚠️ Requirements
 
-- **OS:** Ubuntu 22.04+ or Debian 11+ recommended.
+- **OS:** Ubuntu 22.04+ or Debian 11+ recommended. I use https://community-scripts.org/scripts/docker to create suitable LXC.
 - **VPN:** ProtonVPN account (OpenVPN credentials required).
 - **Tunnel:** Pangolin Newt ID/Secret (optional).
