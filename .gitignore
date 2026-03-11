@@ -1,0 +1,14 @@
+# Environment variables
+.env
+
+# Generated setup files
+info.md
+
+# Application data (if run locally)
+data/
+config/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+*.log
