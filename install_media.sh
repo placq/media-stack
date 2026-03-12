@@ -52,8 +52,8 @@ read -s -p "Newt Secret: " NEWT_SECRET
 echo -e "\n"
 
 # PUID/PGID
-PUID=$(id -u)
-PGID=$(id -g)
+PUID=$(id -u $USER)
+PGID=$(id -g $USER)
 
 # Intelligent QuickSync detection
 GPU_CONFIG=""
@@ -67,7 +67,7 @@ fi
 
 # --- 4. Folder Structure ---
 log_info "Creating folder structure for Hardlinks..."
-sudo mkdir -p "$INSTALL_DIR"/{config,data/{torrents/{movies,tv},media/{movies,tv}}}
+sudo mkdir -p "$INSTALL_DIR"/{config,data/{watch,torrents/{movies,tv},media/{movies,tv}}}
 sudo chown -R $USER:$USER "$INSTALL_DIR"
 
 # --- 5. Environment File (.env) ---
@@ -125,6 +125,7 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data/watch:/watch
     restart: unless-stopped
 
   sonarr:
