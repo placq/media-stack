@@ -46,7 +46,7 @@ read -s -p "Proton OpenVPN Password: " VPN_PASS
 echo ""
 
 echo -e "\n--- PANGOLIN CONFIGURATION (TUNNEL) ---"
-read -p "Pangolin Endpoint [e.g. https://pangolin.wphl.eu]: " PANGOLIN_URL
+read -p "Pangolin Endpoint: " PANGOLIN_URL
 read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
 echo -e "\n"
