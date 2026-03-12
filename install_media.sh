@@ -67,7 +67,7 @@ fi
 
 # --- 4. Folder Structure ---
 log_info "Creating folder structure for Hardlinks..."
-sudo mkdir -p "$INSTALL_DIR"/{config,data/{watch,torrents/{movies,tv},media/{movies,tv}}}
+sudo mkdir -p "$INSTALL_DIR"/{config,data/{watch,torrents/{movies,tv,incomplete},media/{movies,tv}}}
 sudo chown -R $USER:$USER "$INSTALL_DIR"
 
 # --- 5. Environment File (.env) ---
@@ -122,10 +122,12 @@ services:
       - USER=admin
       - PASS=admin
       - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
+      - TRANSMISSION_INCOMPLETE_DIR=/data/torrents/incomplete
+      - TRANSMISSION_INCOMPLETE_DIR_ENABLED=true
+      - TRANSMISSION_WATCH_DIR=/data/watch
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
-      - \${INSTALL_DIR}/data/watch:/watch
     restart: unless-stopped
 
   sonarr:
