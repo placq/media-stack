@@ -51,9 +51,9 @@ read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
 echo -e "\n"
 
-# PUID/PGID
-PUID=$(id -u $USER)
-PGID=$(id -g $USER)
+# PUID/PGID - Fixed to 1000 for standard LSIO compatibility
+PUID=1000
+PGID=1000
 
 # Intelligent QuickSync detection
 GPU_CONFIG=""
@@ -68,7 +68,9 @@ fi
 # --- 4. Folder Structure ---
 log_info "Creating folder structure for Hardlinks..."
 sudo mkdir -p "$INSTALL_DIR"/{config,data/{watch,torrents/{movies,tv,incomplete},media/{movies,tv}}}
-sudo chown -R $USER:$USER "$INSTALL_DIR"
+# Set ownership to 1000:1000 to match container user 'abc'
+sudo chown -R 1000:1000 "$INSTALL_DIR"
+sudo chmod -R 775 "$INSTALL_DIR"
 
 # --- 5. Environment File (.env) ---
 cat <<EOF > "$INSTALL_DIR"/.env
@@ -128,6 +130,7 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data/torrents:/downloads  # For path compatibility
     restart: unless-stopped
 
   sonarr:
@@ -140,6 +143,7 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/sonarr:/config
       - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data/torrents:/downloads  # Match Transmission paths
     ports:
       - 8989:8989
     restart: unless-stopped
@@ -154,6 +158,7 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/radarr:/config
       - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data/torrents:/downloads  # Match Transmission paths
     ports:
       - 7878:7878
     restart: unless-stopped
@@ -279,13 +284,14 @@ The output should show **Proton AG** or **Datacamp Limited** in the 'org' field.
 2. **Transmission Setup:**
    - Check \`docker logs gluetun\` for "port forwarded is XXXXX".
    - In Transmission Web UI (Settings -> Network), enter that port number in "Peer listening port" and verify it is **Open**.
-3. **Library Paths:**
+3. **Remote Path Mapping (FIX PATH ERROR):**
+   - If Sonarr/Radarr report a missing directory, go to **Settings -> Download Clients -> Remote Path Mappings**.
+   - Host: \`gluetun\`, Remote Path: \`/downloads/\`, Local Path: \`/data/torrents/\`.
+4. **Library Paths:**
    - In Sonarr set Root Folder: \`/data/media/tv\`.
    - In Radarr set Root Folder: \`/data/media/movies\`.
-4. **FlareSolverr:**
+5. **FlareSolverr:**
    - In Prowlarr (Settings -> Indexers -> Add Proxy), use host: \`http://flaresolverr:8191\`.
-5. **Jellyseerr:**
-   - Initial configuration is pre-configured to save data in \`/app/config\`.
 
 *File generated on: $(date)*
 EOF
@@ -312,7 +318,7 @@ echo -e "Run: ${CYAN}docker exec transmission curl -s https://ipinfo.io${NC}"
 echo -e "\n${YELLOW}🚀 CRITICAL POST-INSTALLATION STEPS:${NC}"
 echo -e "1. ${GREEN}Internal Networking:${NC} Use **container names** (e.g. ${CYAN}http://sonarr:8989${NC}) instead of IPs for app-to-app connections."
 echo -e "2. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
-echo -e "3. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
-echo -e "4. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} when adding Transmission to Sonarr/Radarr."
+echo -e "3. ${GREEN}Remote Path Mapping:${NC} Fix path errors in Sonarr/Radarr (Instructions in info.md)."
+echo -e "4. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
 echo -e "5. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
 echo -e "====================================================\n"
