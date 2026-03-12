@@ -270,16 +270,18 @@ The output should show **Proton AG** or **Datacamp Limited** in the 'org' field.
 
 ## 🚀 Critical Post-Installation Steps
 
-1. **Transmission Setup:**
-   - In Sonarr/Radarr/Prowlarr, use host: \`gluetun\` (port 9091).
+1. **Internal Networking (IMPORTANT):**
+   - Always use **container names** (e.g., \`http://sonarr:8989\`, \`http://radarr:7878\`, \`http://prowlarr:9696\`) instead of IP addresses when connecting apps to each other.
+   - For Download Client in Sonarr/Radarr, use host: \`gluetun\` (port 9091).
+2. **Transmission Setup:**
    - Check \`docker logs gluetun\` for "port forwarded is XXXXX".
    - In Transmission Web UI (Settings -> Network), enter that port number in "Peer listening port" and verify it is **Open**.
-2. **Library Paths:**
+3. **Library Paths:**
    - In Sonarr set Root Folder: \`/data/media/tv\`.
    - In Radarr set Root Folder: \`/data/media/movies\`.
-3. **FlareSolverr:**
+4. **FlareSolverr:**
    - In Prowlarr (Settings -> Indexers -> Add Proxy), use host: \`http://flaresolverr:8191\`.
-4. **Jellyseerr:**
+5. **Jellyseerr:**
    - Initial configuration is pre-configured to save data in \`/app/config\`.
 
 *File generated on: $(date)*
@@ -305,8 +307,9 @@ echo -e "\n${YELLOW}🛡️  VPN VERIFICATION:${NC}"
 echo -e "Run: ${CYAN}docker exec transmission curl -s https://ipinfo.io${NC}"
 
 echo -e "\n${YELLOW}🚀 CRITICAL POST-INSTALLATION STEPS:${NC}"
-echo -e "1. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
-echo -e "2. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
-echo -e "3. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} when adding Transmission to Sonarr/Radarr."
-echo -e "4. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
+echo -e "1. ${GREEN}Internal Networking:${NC} Use **container names** (e.g. ${CYAN}http://sonarr:8989${NC}) instead of IPs for app-to-app connections."
+echo -e "2. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
+echo -e "3. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
+echo -e "4. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} when adding Transmission to Sonarr/Radarr."
+echo -e "5. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
 echo -e "====================================================\n"
