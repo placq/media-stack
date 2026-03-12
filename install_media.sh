@@ -216,7 +216,7 @@ services:
       - PGID=\${PGID}
       - TZ=\${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/jellyseerr:/config
+      - \${INSTALL_DIR}/config/jellyseerr:/app/config
     ports:
       - 5055:5055
     restart: unless-stopped
