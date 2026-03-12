@@ -121,6 +121,7 @@ services:
       - TZ=\${TZ}
       - USER=admin
       - PASS=admin
+      - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
@@ -185,7 +186,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/bazarr:/config
-      - \${INSTALL_DIR}/data/media:/data/media
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 6767:6767
     restart: unless-stopped
@@ -199,7 +200,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/jellyfin:/config
-      - \${INSTALL_DIR}/data/media:/data
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 8096:8096
     $(echo -e "$GPU_CONFIG")
