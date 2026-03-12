@@ -263,12 +263,24 @@ Your applications are available at the following addresses:
 | 📝 Bazarr (Subtitles) | http://${SERVER_IP}:6767 | - |
 | 🔄 WUD (Updates) | http://${SERVER_IP}:3000 | - |
 
-## Critical Post-Installation Steps
+## 🛡️ VPN Verification
+To verify if your traffic is securely routed through Proton VPN, run:
+\`docker exec transmission curl -s https://ipinfo.io\`
+The output should show **Proton AG** or **Datacamp Limited** in the 'org' field.
 
-1. **Transmission Host:** In Sonarr/Radarr/Prowlarr use host: \`gluetun\` (port 9091).
-2. **Download Paths:** In Transmission set: \`/data/torrents\`.
-3. **Library Paths:** In Sonarr/Radarr set: \`/data/media/tv\` and \`/data/media/movies\`.
-4. **FlareSolverr:** In Prowlarr add Indexer Proxy: \`http://flaresolverr:8191\`.
+## 🚀 Critical Post-Installation Steps
+
+1. **Transmission Setup:**
+   - In Sonarr/Radarr/Prowlarr, use host: \`gluetun\` (port 9091).
+   - Check \`docker logs gluetun\` for "port forwarded is XXXXX".
+   - In Transmission Web UI (Settings -> Network), enter that port number in "Peer listening port" and verify it is **Open**.
+2. **Library Paths:**
+   - In Sonarr set Root Folder: \`/data/media/tv\`.
+   - In Radarr set Root Folder: \`/data/media/movies\`.
+3. **FlareSolverr:**
+   - In Prowlarr (Settings -> Indexers -> Add Proxy), use host: \`http://flaresolverr:8191\`.
+4. **Jellyseerr:**
+   - Initial configuration is pre-configured to save data in \`/app/config\`.
 
 *File generated on: $(date)*
 EOF
@@ -289,9 +301,12 @@ echo -e "🔍  ${BLUE}Prowlarr (Indexers):${NC}    http://${SERVER_IP}:9696"
 echo -e "📝  ${BLUE}Bazarr (Subtitles):${NC}        http://${SERVER_IP}:6767"
 echo -e "🔄  ${BLUE}WUD (Updates):${NC}           http://${SERVER_IP}:3000"
 
-echo -e "\n${YELLOW}CRITICAL POST-INSTALLATION STEPS (Saved in $INSTALL_DIR/info.md):${NC}"
-echo -e "1. ${YELLOW}Transmission Host:${NC} In Sonarr/Radarr/Prowlarr use host: ${GREEN}gluetun${NC} (port 9091)."
-echo -e "2. ${YELLOW}Download Paths:${NC} In Transmission set: ${GREEN}/data/torrents${NC}."
-echo -e "3. ${YELLOW}Library Paths:${NC} In Sonarr/Radarr set: ${GREEN}/data/media/tv${NC} and ${GREEN}/data/media/movies${NC}."
-echo -e "4. ${YELLOW}FlareSolverr:${NC} In Prowlarr add Indexer Proxy: ${GREEN}http://flaresolverr:8191${NC}."
+echo -e "\n${YELLOW}🛡️  VPN VERIFICATION:${NC}"
+echo -e "Run: ${CYAN}docker exec transmission curl -s https://ipinfo.io${NC}"
+
+echo -e "\n${YELLOW}🚀 CRITICAL POST-INSTALLATION STEPS:${NC}"
+echo -e "1. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
+echo -e "2. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
+echo -e "3. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} when adding Transmission to Sonarr/Radarr."
+echo -e "4. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
 echo -e "====================================================\n"
