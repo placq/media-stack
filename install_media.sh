@@ -86,6 +86,7 @@ TZ=Europe/Warsaw
 EOF
 
 # --- 6. Docker Compose File (docker-compose.yml) ---
+# Unified volume path /data for ALL containers to avoid Remote Path Mapping
 cat <<EOF > "$INSTALL_DIR"/docker-compose.yml
 services:
   gluetun:
@@ -129,8 +130,7 @@ services:
       - TRANSMISSION_WATCH_DIR=/data/watch
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
-      - \${INSTALL_DIR}/data:/data
-      - \${INSTALL_DIR}/data/torrents:/downloads  # For path compatibility
+      - \${INSTALL_DIR}/data:/data  # Unified path
     restart: unless-stopped
 
   sonarr:
@@ -142,8 +142,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/sonarr:/config
-      - \${INSTALL_DIR}/data:/data
-      - \${INSTALL_DIR}/data/torrents:/downloads  # Match Transmission paths
+      - \${INSTALL_DIR}/data:/data  # Unified path
     ports:
       - 8989:8989
     restart: unless-stopped
@@ -157,8 +156,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/radarr:/config
-      - \${INSTALL_DIR}/data:/data
-      - \${INSTALL_DIR}/data/torrents:/downloads  # Match Transmission paths
+      - \${INSTALL_DIR}/data:/data  # Unified path
     ports:
       - 7878:7878
     restart: unless-stopped
@@ -194,7 +192,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/bazarr:/config
-      - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data:/data  # Unified path
     ports:
       - 6767:6767
     restart: unless-stopped
@@ -208,7 +206,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/jellyfin:/config
-      - \${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/data:/data  # Unified path
     ports:
       - 8096:8096
     $(echo -e "$GPU_CONFIG")
@@ -284,13 +282,11 @@ The output should show **Proton AG** or **Datacamp Limited** in the 'org' field.
 2. **Transmission Setup:**
    - Check \`docker logs gluetun\` for "port forwarded is XXXXX".
    - In Transmission Web UI (Settings -> Network), enter that port number in "Peer listening port" and verify it is **Open**.
-3. **Remote Path Mapping (FIX PATH ERROR):**
-   - If Sonarr/Radarr report a missing directory, go to **Settings -> Download Clients -> Remote Path Mappings**.
-   - Host: \`gluetun\`, Remote Path: \`/downloads/\`, Local Path: \`/data/torrents/\`.
-4. **Library Paths:**
+3. **Library Paths (NO MAPPING NEEDED):**
+   - All apps use the unified \`/data\` path.
    - In Sonarr set Root Folder: \`/data/media/tv\`.
    - In Radarr set Root Folder: \`/data/media/movies\`.
-5. **FlareSolverr:**
+4. **FlareSolverr:**
    - In Prowlarr (Settings -> Indexers -> Add Proxy), use host: \`http://flaresolverr:8191\`.
 
 *File generated on: $(date)*
@@ -318,7 +314,7 @@ echo -e "Run: ${CYAN}docker exec transmission curl -s https://ipinfo.io${NC}"
 echo -e "\n${YELLOW}🚀 CRITICAL POST-INSTALLATION STEPS:${NC}"
 echo -e "1. ${GREEN}Internal Networking:${NC} Use **container names** (e.g. ${CYAN}http://sonarr:8989${NC}) instead of IPs for app-to-app connections."
 echo -e "2. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
-echo -e "3. ${GREEN}Remote Path Mapping:${NC} Fix path errors in Sonarr/Radarr (Instructions in info.md)."
-echo -e "4. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
+echo -e "3. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
+echo -e "4. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} (port 9091)."
 echo -e "5. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
 echo -e "====================================================\n"
