@@ -9,23 +9,31 @@ NC='\033[0m'
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# --- 0. Sprawdzenie uprawnień ---
+# --- 0. Sprawdzenie uprawnień i środowiska ---
 if [[ $EUID -ne 0 ]]; then
    log_error "Ten skrypt musi być uruchomiony z uprawnieniami roota (sudo)."
 fi
+
+# Wykrywanie realnego użytkownika (za sudo)
+REAL_USER=${SUDO_USER:-$USER}
+PUID=$(id -u "$REAL_USER")
+PGID=$(id -g "$REAL_USER")
+TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/Warsaw")
 
 # --- 1. Aktualizacja Systemu ---
 log_info "Aktualizacja list pakietów..."
 apt update && apt upgrade -y || log_error "Aktualizacja systemu nie powiodła się."
 
-# --- 2. Instalacja Docker (Poprawione repozytorium) ---
+# --- 2. Instalacja Docker ---
 if ! command -v docker &> /dev/null; then
     log_info "Instalacja Docker (oficjalne repozytorium)..."
     apt install -y ca-certificates curl gnupg lsb-release
-    mkdir -p /etc/apt/keyrings
+    install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
     apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
@@ -34,14 +42,16 @@ log_success "Docker i Docker Compose są gotowe."
 # --- 3. Konfiguracja Interaktywna ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.1)     ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.2)     ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
 log_info "Wykryte IP serwera: ${SERVER_IP}"
+log_info "Użytkownik: ${REAL_USER} (PUID: ${PUID}, PGID: ${PGID})"
+log_info "Strefa czasowa: ${TZ}"
 
-read -p "Ścieżka instalacji [/root/media-stack]: " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-/root/media-stack}
+read -p "Ścieżka instalacji [/home/${REAL_USER}/media-stack]: " INSTALL_DIR
+INSTALL_DIR=${INSTALL_DIR:-/home/${REAL_USER}/media-stack}
 
 echo -e "\n--- VPN (PROTONVPN) ---"
 read -p "Proton Username (OpenVPN): " VPN_USER
@@ -52,30 +62,42 @@ echo -e "\n--- PANGOLIN (TUNNEL) ---"
 read -p "Pangolin Endpoint: " PANGOLIN_URL
 read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
-echo -e "\n"
+echo ""
 
-PUID=1000
-PGID=1000
+echo -e "\n--- TRANSMISSION ---"
+read -p "Transmission Username [admin]: " TR_USER
+TR_USER=${TR_USER:-admin}
+read -s -p "Transmission Password [admin]: " TR_PASS
+TR_PASS=${TR_PASS:-admin}
+echo ""
 
 # QuickSync detection
 GPU_CONFIG=""
 if [ -d "/dev/dri" ]; then
-    log_info "Wykryto Intel QuickSync."
-    read -p "Włączyć wsparcie GPU w Jellyfin? (y/n): " ENABLE_GPU
+    log_info "Wykryto sterowniki GPU (/dev/dri)."
+    read -p "Włączyć wsparcie GPU (Intel QuickSync) in Jellyfin? (y/n): " ENABLE_GPU
     if [[ "$ENABLE_GPU" == "y" ]]; then
-        GPU_CONFIG="devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$(stat -c '%g' /dev/dri/renderD128)\""
+        RENDER_GID=$(stat -c '%g' /dev/dri/renderD128 2>/dev/null || echo "107")
+        GPU_CONFIG="devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$RENDER_GID\""
     fi
 fi
 
-# --- 4. Struktura Katalogów i Uprawnienia ---
+# --- 4. Struktura Katalogów ---
 log_info "Przygotowanie struktury katalogów w $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"/{config/{gluetun,transmission,sonarr,radarr,prowlarr,bazarr,jellyfin,jellyseerr,flaresolverr},data/{torrents/{movies,tv,incomplete},media/{movies,tv}},watch}
+DIRS=(
+    "config/gluetun" "config/transmission" "config/sonarr" "config/radarr" 
+    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr"
+    "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete" 
+    "data/media/movies" "data/media/tv" "watch"
+)
 
-# Ustawienie uprawnień tylko jeśli to konieczne (optymalizacja)
-chown -R 1000:1000 "$INSTALL_DIR"
-chmod -R 775 "$INSTALL_DIR"
+for dir in "${DIRS[@]}"; do
+    mkdir -p "$INSTALL_DIR/$dir"
+done
 
-# --- 5. Plik .env ---
+# --- 5. Pliki Konfiguracyjne ---
+[ -f "$INSTALL_DIR/.env" ] && mv "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.bak"
+
 cat <<EOF > "$INSTALL_DIR"/.env
 PUID=$PUID
 PGID=$PGID
@@ -85,10 +107,12 @@ VPN_PASS=$VPN_PASS
 PANGOLIN_URL=$PANGOLIN_URL
 NEWT_ID=$NEWT_ID
 NEWT_SECRET=$NEWT_SECRET
-TZ=Europe/Warsaw
+TZ=$TZ
+TR_USER=$TR_USER
+TR_PASS=$TR_PASS
 EOF
 
-# --- 6. Docker Compose ---
+# Generowanie docker-compose.yml
 cat <<EOF > "$INSTALL_DIR"/docker-compose.yml
 networks:
   media-network:
@@ -128,8 +152,8 @@ services:
       - PUID=\${PUID}
       - PGID=\${PGID}
       - TZ=\${TZ}
-      - USER=admin
-      - PASS=admin
+      - USER=\${TR_USER}
+      - PASS=\${TR_PASS}
       - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
       - TRANSMISSION_INCOMPLETE_DIR=/data/torrents/incomplete
     volumes:
@@ -223,7 +247,7 @@ services:
       - media-network
     ports:
       - 8096:8096
-    $(echo -e "$GPU_CONFIG")
+$(echo -e "$GPU_CONFIG" | sed 's/^/    /')
     restart: unless-stopped
 
   jellyseerr:
@@ -253,11 +277,17 @@ services:
     restart: unless-stopped
 EOF
 
-# --- 7. Uruchomienie ---
-log_info "Uruchamianie kontenerów (może to potrwać kilka minut)..."
+# Ustawienie uprawnień dla całego stosu
+chown -R $PUID:$PGID "$INSTALL_DIR"
+find "$INSTALL_DIR" -type d -exec chmod 775 {} +
+find "$INSTALL_DIR" -type f -exec chmod 664 {} +
+chmod 600 "$INSTALL_DIR"/.env
+
+# --- 6. Uruchomienie ---
+log_info "Uruchamianie kontenerów..."
 cd "$INSTALL_DIR" && docker compose up -d
 
-# --- 8. Tworzenie info.md ---
+# --- 7. Tworzenie info.md ---
 cat <<EOF > "$INSTALL_DIR"/info.md
 # Perfect Media Stack - Podsumowanie
 
