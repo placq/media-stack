@@ -367,6 +367,12 @@ Instead, use the container names. This is significantly faster and prevents time
 *   **Prowlarr Host:** \`prowlarr\` (Port: \`9696\`)
 *   **FlareSolverr Host:** \`flaresolverr\` (Port: \`8191\`) - Add this as an Indexer Proxy in Prowlarr as \`http://flaresolverr:8191\`
 
+## ⚙️ Radarr & Sonarr Configuration (Crucial!)
+When you add Transmission as your Download Client in Radarr or Sonarr, you MUST set the correct **Category** to prevent path errors:
+*   In **Radarr** (Settings -> Download Clients): Set Category to \`movies\`
+*   In **Sonarr** (Settings -> Download Clients): Set Category to \`tv\`
+*(This tells Transmission to put files in \`/data/torrents/movies\` or \`tv\`, which exactly matches our automated folder structure).*
+
 ## 🛡️ VPN and Port Forwarding (ProtonVPN)
 Transmission is routed through the Gluetun VPN container. For optimal download speeds and active peer connections, you must configure the forwarded port in Transmission:
 1. Run this command in your terminal to check the Gluetun logs:
