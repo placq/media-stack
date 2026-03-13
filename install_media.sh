@@ -1,3 +1,4 @@
+#!/bin/bash
 
 # --- Color Configuration ---
 RED='\033[0;31m'
@@ -22,12 +23,22 @@ PUID=$(id -u "$REAL_USER")
 PGID=$(id -g "$REAL_USER")
 TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/London")
 
-# --- 1. System Update ---
+# --- 1. Pre-Flight Port Check ---
+log_info "Running pre-flight checks..."
+REQUIRED_PORTS=(8096 5055 9091 7878 8989 9696 6767 3000)
+for port in "${REQUIRED_PORTS[@]}"; do
+    if ss -tuln | grep -q ":$port "; then
+        log_error "Port $port is already in use! Please stop the conflicting service and try again."
+    fi
+done
+log_success "All required ports are available."
+
+# --- 2. System Update ---
 log_info "Updating package lists..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get upgrade -y -q || log_error "System update failed."
 
-# --- 2. Docker Installation ---
+# --- 3. Docker Installation ---
 if ! command -v docker &> /dev/null; then
     log_info "Installing Docker (official repository)..."
     apt-get install -y -q ca-certificates curl gnupg lsb-release
@@ -39,10 +50,10 @@ if ! command -v docker &> /dev/null; then
 fi
 log_success "Docker and Docker Compose are ready."
 
-# --- 3. Interactive Configuration ---
+# --- 4. Interactive Configuration ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.2)     ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.3)     ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -50,8 +61,22 @@ log_info "Detected Server IP: ${SERVER_IP}"
 log_info "User: ${REAL_USER} (PUID: ${PUID}, PGID: ${PGID})"
 log_info "Timezone: ${TZ}"
 
-read -p "Installation path [/root/media-stack]: " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-/root/media-stack}
+# Avoid running containers as root (PUID 0)
+if [ "$PUID" -eq 0 ]; then
+    log_warn "Detected root user. Running containers as root is not recommended."
+    read -p "Create a dedicated 'media' user (UID 1000) for containers? (Y/n): " CREATE_USER
+    if [[ "$CREATE_USER" != "n" && "$CREATE_USER" != "N" ]]; then
+        if ! id "media" &>/dev/null; then
+            useradd -u 1000 -U -d /opt/media-stack -s /bin/false media
+        fi
+        PUID=$(id -u media)
+        PGID=$(id -g media)
+        log_success "Using PUID: $PUID, PGID: $PGID (User: media)"
+    fi
+fi
+
+read -p "Installation path [/opt/media-stack]: " INSTALL_DIR
+INSTALL_DIR=${INSTALL_DIR:-/opt/media-stack}
 
 echo -e "\n--- VPN (PROTONVPN) ---"
 read -p "Proton Username (OpenVPN): " VPN_USER
@@ -65,10 +90,12 @@ read -s -p "Newt Secret: " NEWT_SECRET
 echo ""
 
 echo -e "\n--- TRANSMISSION ---"
+# Generate secure default password instead of 'admin'
+DEFAULT_TR_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
 read -p "Transmission Username [admin]: " TR_USER
 TR_USER=${TR_USER:-admin}
-read -s -p "Transmission Password [admin]: " TR_PASS
-TR_PASS=${TR_PASS:-admin}
+read -p "Transmission Password [${DEFAULT_TR_PASS}]: " TR_PASS
+TR_PASS=${TR_PASS:-$DEFAULT_TR_PASS}
 echo ""
 
 # QuickSync detection
@@ -82,20 +109,21 @@ if [ -d "/dev/dri" ]; then
     fi
 fi
 
-# --- 4. Directory Structure ---
+# --- 5. Directory Structure ---
 log_info "Preparing directory structure in $INSTALL_DIR..."
 DIRS=(
     "config/gluetun" "config/transmission" "config/sonarr" "config/radarr"
-    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr"
+    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr" "config/wud"
     "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete"
     "data/media/movies" "data/media/tv"
 )
 
+# Efficient folder creation
 for dir in "${DIRS[@]}"; do
     mkdir -p "$INSTALL_DIR/$dir"
 done
 
-# --- 5. Fix Transmission Pathing (Pre-generate settings.json) ---
+# --- 6. Fix Transmission Pathing (Pre-generate settings.json) ---
 # We ONLY enforce the correct paths here to fix hardlinks.
 # Authentication is left to the linuxserver container variables (USER/PASS).
 log_info "Pre-configuring Transmission settings to use /data volume..."
@@ -107,7 +135,7 @@ cat <<EOF > "$INSTALL_DIR/config/transmission/settings.json"
 }
 EOF
 
-# --- 6. Configuration Files ---
+# --- 7. Configuration Files ---
 [ -f "$INSTALL_DIR/.env" ] && mv "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.bak"
 
 # Wrap all values in quotes to prevent issues with spaces/special characters
@@ -185,6 +213,8 @@ services:
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
+    depends_on:
+      - flaresolverr
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
@@ -287,6 +317,20 @@ $(echo -e "$GPU_CONFIG")
     networks:
       - media-network
     restart: unless-stopped
+
+  wud:
+    image: fmartinou/whats-up-docker:latest
+    container_name: wud
+    environment:
+      - TZ=\${TZ}
+      - WUD_LOG_LEVEL=INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 3000:3000
+    networks:
+      - media-network
+    restart: unless-stopped
 EOF
 
 # Set permissions for the stack
@@ -295,7 +339,7 @@ find "$INSTALL_DIR" -type d -exec chmod 775 {} +
 find "$INSTALL_DIR" -type f -exec chmod 664 {} +
 chmod 600 "$INSTALL_DIR/.env"
 
-# --- 7. Create important_info.md ---
+# --- 8. Create important_info.md ---
 cat <<EOF > "$INSTALL_DIR/important_info.md"
 # Media Stack - Important Information
 
@@ -308,6 +352,11 @@ You can access your services locally via your server's IP address:
 *   **Sonarr:** \`http://${SERVER_IP}:8989\`
 *   **Prowlarr:** \`http://${SERVER_IP}:9696\`
 *   **Bazarr:** \`http://${SERVER_IP}:6767\`
+*   **WUD:** \`http://${SERVER_IP}:3000\`
+
+## 🔑 Transmission Credentials
+*   **Username:** \`${TR_USER}\`
+*   **Password:** \`${TR_PASS}\`
 
 ## 🔗 Inter-Container Communication (IMPORTANT!)
 When configuring services to talk to each other (e.g., adding Transmission or Prowlarr to Radarr), **DO NOT use the server's IP address**.
@@ -335,7 +384,7 @@ When Radarr/Sonarr imports a movie/show from the torrents folder, it will create
 *Generated on: $(date)*
 EOF
 
-# --- 8. Startup ---
+# --- 9. Startup ---
 log_info "Starting Docker containers..."
 cd "$INSTALL_DIR" && docker compose up -d
 
