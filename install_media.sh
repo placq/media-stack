@@ -1,4 +1,3 @@
-#!/bin/bash
 
 # --- Color Configuration ---
 RED='\033[0;31m'
@@ -17,7 +16,7 @@ if [[ $EUID -ne 0 ]]; then
    log_error "This script must be run with root privileges (sudo)."
 fi
 
-# Detect real user (behind sudo)
+# Detect real user (behind sudo or root)
 REAL_USER=${SUDO_USER:-$USER}
 PUID=$(id -u "$REAL_USER")
 PGID=$(id -g "$REAL_USER")
@@ -25,17 +24,18 @@ TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/London")
 
 # --- 1. System Update ---
 log_info "Updating package lists..."
-apt update && apt upgrade -y || log_error "System update failed."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update && apt-get upgrade -y -q || log_error "System update failed."
 
 # --- 2. Docker Installation ---
 if ! command -v docker &> /dev/null; then
     log_info "Installing Docker (official repository)..."
-    apt install -y ca-certificates curl gnupg lsb-release
+    apt-get install -y -q ca-certificates curl gnupg lsb-release
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --yes --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    apt-get update && apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
 log_success "Docker and Docker Compose are ready."
 
@@ -50,8 +50,8 @@ log_info "Detected Server IP: ${SERVER_IP}"
 log_info "User: ${REAL_USER} (PUID: ${PUID}, PGID: ${PGID})"
 log_info "Timezone: ${TZ}"
 
-read -p "Installation path [/home/${REAL_USER}/media-stack]: " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-/home/${REAL_USER}/media-stack}
+read -p "Installation path [/root/media-stack]: " INSTALL_DIR
+INSTALL_DIR=${INSTALL_DIR:-/root/media-stack}
 
 echo -e "\n--- VPN (PROTONVPN) ---"
 read -p "Proton Username (OpenVPN): " VPN_USER
@@ -76,44 +76,58 @@ GPU_CONFIG=""
 if [ -d "/dev/dri" ]; then
     log_info "GPU drivers detected (/dev/dri)."
     read -p "Enable GPU support (Intel QuickSync) in Jellyfin? (y/n): " ENABLE_GPU
-    if [[ "$ENABLE_GPU" == "y" ]]; then
+    if [[ "$ENABLE_GPU" == "y" || "$ENABLE_GPU" == "Y" ]]; then
         RENDER_GID=$(stat -c '%g' /dev/dri/renderD128 2>/dev/null || echo "107")
-        GPU_CONFIG="devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$RENDER_GID\""
+        GPU_CONFIG="    devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$RENDER_GID\""
     fi
 fi
 
 # --- 4. Directory Structure ---
 log_info "Preparing directory structure in $INSTALL_DIR..."
 DIRS=(
-    "config/gluetun" "config/transmission" "config/sonarr" "config/radarr" 
+    "config/gluetun" "config/transmission" "config/sonarr" "config/radarr"
     "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr"
-    "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete" 
-    "data/media/movies" "data/media/tv" "watch"
+    "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete"
+    "data/media/movies" "data/media/tv"
 )
 
 for dir in "${DIRS[@]}"; do
     mkdir -p "$INSTALL_DIR/$dir"
 done
 
-# --- 5. Configuration Files ---
+# --- 5. Fix Transmission Pathing (Pre-generate settings.json) ---
+# We ONLY enforce the correct paths here to fix hardlinks.
+# Authentication is left to the linuxserver container variables (USER/PASS).
+log_info "Pre-configuring Transmission settings to use /data volume..."
+cat <<EOF > "$INSTALL_DIR/config/transmission/settings.json"
+{
+    "download-dir": "/data/torrents",
+    "incomplete-dir": "/data/torrents/incomplete",
+    "incomplete-dir-enabled": true
+}
+EOF
+
+# --- 6. Configuration Files ---
 [ -f "$INSTALL_DIR/.env" ] && mv "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.bak"
 
-cat <<EOF > "$INSTALL_DIR"/.env
-PUID=$PUID
-PGID=$PGID
-INSTALL_DIR=$INSTALL_DIR
-VPN_USER=$VPN_USER+pmp
-VPN_PASS=$VPN_PASS
-PANGOLIN_URL=$PANGOLIN_URL
-NEWT_ID=$NEWT_ID
-NEWT_SECRET=$NEWT_SECRET
-TZ=$TZ
-TR_USER=$TR_USER
-TR_PASS=$TR_PASS
+# Wrap all values in quotes to prevent issues with spaces/special characters
+cat <<EOF > "$INSTALL_DIR/.env"
+PUID="$PUID"
+PGID="$PGID"
+INSTALL_DIR="$INSTALL_DIR"
+VPN_USER="$VPN_USER+pmp"
+VPN_PASS="$VPN_PASS"
+PANGOLIN_URL="$PANGOLIN_URL"
+NEWT_ID="$NEWT_ID"
+NEWT_SECRET="$NEWT_SECRET"
+TZ="$TZ"
+TR_USER="$TR_USER"
+TR_PASS="$TR_PASS"
 EOF
 
 # Generate docker-compose.yml
-cat <<EOF > "$INSTALL_DIR"/docker-compose.yml
+log_info "Generating docker-compose.yml..."
+cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
 networks:
   media-network:
     driver: bridge
@@ -154,8 +168,6 @@ services:
       - TZ=\${TZ}
       - USER=\${TR_USER}
       - PASS=\${TR_PASS}
-      - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
-      - TRANSMISSION_INCOMPLETE_DIR=/data/torrents/incomplete
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
@@ -247,7 +259,7 @@ services:
       - media-network
     ports:
       - 8096:8096
-$(echo -e "$GPU_CONFIG" | sed 's/^/    /')
+$(echo -e "$GPU_CONFIG")
     restart: unless-stopped
 
   jellyseerr:
@@ -281,49 +293,56 @@ EOF
 chown -R $PUID:$PGID "$INSTALL_DIR"
 find "$INSTALL_DIR" -type d -exec chmod 775 {} +
 find "$INSTALL_DIR" -type f -exec chmod 664 {} +
-chmod 600 "$INSTALL_DIR"/.env
+chmod 600 "$INSTALL_DIR/.env"
 
-# --- 6. Startup ---
-log_info "Starting containers..."
-cd "$INSTALL_DIR" && docker compose up -d
+# --- 7. Create important_info.md ---
+cat <<EOF > "$INSTALL_DIR/important_info.md"
+# Media Stack - Important Information
 
-# --- 7. Create info.md ---
-cat <<EOF > "$INSTALL_DIR"/info.md
-# Perfect Media Stack - Summary
+## 🌐 Services and Addresses
+You can access your services locally via your server's IP address:
+*   **Jellyfin:** \`http://${SERVER_IP}:8096\`
+*   **Jellyseerr:** \`http://${SERVER_IP}:5055\`
+*   **Transmission:** \`http://${SERVER_IP}:9091\`
+*   **Radarr:** \`http://${SERVER_IP}:7878\`
+*   **Sonarr:** \`http://${SERVER_IP}:8989\`
+*   **Prowlarr:** \`http://${SERVER_IP}:9696\`
+*   **Bazarr:** \`http://${SERVER_IP}:6767\`
 
-| Service | Address |
-| :--- | :--- |
-| 🎬 Jellyfin | http://${SERVER_IP}:8096 |
-| 🎫 Jellyseerr | http://${SERVER_IP}:5055 |
-| 📥 Transmission | http://${SERVER_IP}:9091 |
-| 🎥 Radarr | http://${SERVER_IP}:7878 |
-| 📺 Sonarr | http://${SERVER_IP}:8989 |
-| 🔍 Prowlarr | http://${SERVER_IP}:9696 |
-| 📝 Bazarr | http://${SERVER_IP}:6767 |
+## 🔗 Inter-Container Communication (IMPORTANT!)
+When configuring services to talk to each other (e.g., adding Transmission or Prowlarr to Radarr), **DO NOT use the server's IP address**.
+Instead, use the container names. This is significantly faster and prevents timeouts.
 
-## 🛡️ VPN and Port Forwarding
-1. Check port in logs: \`docker logs gluetun\`
-2. Find the line: \`port forwarded is XXXXX\`.
-3. In Transmission (Settings -> Network), enter this port in "Peer listening port".
+*   **Transmission Host:** \`gluetun\` (Port: \`9091\`)
+    *(Note: Transmission routes its network through Gluetun, so Gluetun acts as the host on the Docker network)*
+*   **Prowlarr Host:** \`prowlarr\` (Port: \`9696\`)
+*   **FlareSolverr Host:** \`flaresolverr\` (Port: \`8191\`) - Add this as an Indexer Proxy in Prowlarr as \`http://flaresolverr:8191\`
 
-## ⚙️ Prowlarr + FlareSolverr Configuration
-In Prowlarr, add FlareSolverr as an Indexer Proxy:
-- Host: \`http://flaresolverr:8191\`
+## 🛡️ VPN and Port Forwarding (ProtonVPN)
+Transmission is routed through the Gluetun VPN container. For optimal download speeds and active peer connections, you must configure the forwarded port in Transmission:
+1. Run this command in your terminal to check the Gluetun logs:
+   \`docker logs gluetun | grep "port forwarded"\`
+2. Note the port number (e.g., \`port forwarded is 45678\`).
+3. Open the Transmission Web UI (\`http://${SERVER_IP}:9091\`).
+4. Go to **Settings -> Network** and enter this port number in the **"Peer listening port"** field.
+5. *(Note: This port might change occasionally depending on ProtonVPN. If downloads ever slow down, check the logs and update the port again.)*
+
+## 📁 Folder Mapping and Hardlinks
+We have pre-configured Transmission to download directly to \`/data/torrents\`.
+Because all containers use the unified \`/data\` volume mapping, **hardlinks will work automatically**.
+When Radarr/Sonarr imports a movie/show from the torrents folder, it will create a hardlink in \`/data/media\` instead of copying the file, saving disk space and time. No remote path mappings are required in Radarr or Sonarr!
 
 *Generated on: $(date)*
 EOF
 
-log_success "Installation successful in $INSTALL_DIR!"
-log_info "All data is in one place. Hardlinks will work automatically."
+# --- 8. Startup ---
+log_info "Starting Docker containers..."
+cd "$INSTALL_DIR" && docker compose up -d
 
-echo -e "\n${BLUE}===========================================${NC}"
-echo -e "${BLUE}       SERVICE LIST (Accessible at: ${SERVER_IP}) ${NC}"
-echo -e "${BLUE}===========================================${NC}"
-echo -e "🎬 Jellyfin:     http://${SERVER_IP}:8096"
-echo -e "🎫 Jellyseerr:   http://${SERVER_IP}:5055"
-echo -e "📥 Transmission: http://${SERVER_IP}:9091"
-echo -e "🎥 Radarr:       http://${SERVER_IP}:7878"
-echo -e "📺 Sonarr:       http://${SERVER_IP}:8989"
-echo -e "🔍 Prowlarr:     http://${SERVER_IP}:9696"
-echo -e "📝 Bazarr:       http://${SERVER_IP}:6767"
-echo -e "${BLUE}===========================================${NC}\n"
+log_success "Installation successful in $INSTALL_DIR!"
+echo ""
+echo -e "${BLUE}=================================================================${NC}"
+cat "$INSTALL_DIR/important_info.md"
+echo -e "${BLUE}=================================================================${NC}"
+echo -e "${GREEN}A copy of this summary has been saved to $INSTALL_DIR/important_info.md${NC}"
+echo -e "${GREEN}You can also manually edit $INSTALL_DIR/docker-compose.yml anytime.${NC}"
