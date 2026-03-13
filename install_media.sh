@@ -11,25 +11,30 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# --- 1. Aktualizacja Systemu ---
-log_info "Aktualizacja systemu..."
-sudo apt update && sudo apt upgrade -y || log_error "Aktualizacja nie powiodła się."
+# --- 0. Sprawdzenie uprawnień ---
+if [[ $EUID -ne 0 ]]; then
+   log_error "Ten skrypt musi być uruchomiony z uprawnieniami roota (sudo)."
+fi
 
-# --- 2. Instalacja Docker ---
+# --- 1. Aktualizacja Systemu ---
+log_info "Aktualizacja list pakietów..."
+apt update && apt upgrade -y || log_error "Aktualizacja systemu nie powiodła się."
+
+# --- 2. Instalacja Docker (Poprawione repozytorium) ---
 if ! command -v docker &> /dev/null; then
     log_info "Instalacja Docker (oficjalne repozytorium)..."
-    sudo apt install -y ca-certificates curl gnupg lsb-release
-    sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    apt install -y ca-certificates curl gnupg lsb-release
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
-log_success "Docker jest gotowy."
+log_success "Docker i Docker Compose są gotowe."
 
 # --- 3. Konfiguracja Interaktywna ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION (FIXED)    ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.1)     ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -38,42 +43,37 @@ log_info "Wykryte IP serwera: ${SERVER_IP}"
 read -p "Ścieżka instalacji [/root/media-stack]: " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-/root/media-stack}
 
-echo -e "\n--- VPN CONFIGURATION (PROTONVPN) ---"
-echo -e "${YELLOW}UWAGA:${NC} Użyj 'OpenVPN Credentials' z panelu Proton, NIE głównego hasła!"
-read -p "Proton Username: " VPN_USER
-read -s -p "Proton Password: " VPN_PASS
+echo -e "\n--- VPN (PROTONVPN) ---"
+read -p "Proton Username (OpenVPN): " VPN_USER
+read -s -p "Proton Password (OpenVPN): " VPN_PASS
 echo ""
 
-echo -e "\n--- PANGOLIN CONFIGURATION (TUNNEL) ---"
+echo -e "\n--- PANGOLIN (TUNNEL) ---"
 read -p "Pangolin Endpoint: " PANGOLIN_URL
 read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
-echo ""
+echo -e "\n"
 
-# PUID/PGID - Standard dla LSIO
 PUID=1000
 PGID=1000
 
 # QuickSync detection
 GPU_CONFIG=""
 if [ -d "/dev/dri" ]; then
-    log_info "Wykryto wsparcie dla Intel QuickSync."
-    read -p "Włączyć transkodowanie sprzętowe w Jellyfin? (y/n): " ENABLE_GPU
+    log_info "Wykryto Intel QuickSync."
+    read -p "Włączyć wsparcie GPU w Jellyfin? (y/n): " ENABLE_GPU
     if [[ "$ENABLE_GPU" == "y" ]]; then
         GPU_CONFIG="devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$(stat -c '%g' /dev/dri/renderD128)\""
     fi
 fi
 
-# --- 4. Struktura Katalogów (Pod Hardlinki) ---
-log_info "Tworzenie struktury katalogów i ustawianie uprawnień..."
-# Tworzymy czystą strukturę
-sudo mkdir -p "$INSTALL_DIR"/{config,data,watch}
-sudo mkdir -p "$INSTALL_DIR"/config/{gluetun,transmission,sonarr,radarr,prowlarr,bazarr,jellyfin,jellyseerr}
-sudo mkdir -p "$INSTALL_DIR"/data/{torrents/{movies,tv,incomplete},media/{movies,tv}}
+# --- 4. Struktura Katalogów i Uprawnienia ---
+log_info "Przygotowanie struktury katalogów w $INSTALL_DIR..."
+mkdir -p "$INSTALL_DIR"/{config/{gluetun,transmission,sonarr,radarr,prowlarr,bazarr,jellyfin,jellyseerr,flaresolverr},data/{torrents/{movies,tv,incomplete},media/{movies,tv}},watch}
 
-# Kluczowe: uprawnienia dla użytkownika 1000 (abc w kontenerach)
-sudo chown -R 1000:1000 "$INSTALL_DIR"
-sudo chmod -R 775 "$INSTALL_DIR"
+# Ustawienie uprawnień tylko jeśli to konieczne (optymalizacja)
+chown -R 1000:1000 "$INSTALL_DIR"
+chmod -R 775 "$INSTALL_DIR"
 
 # --- 5. Plik .env ---
 cat <<EOF > "$INSTALL_DIR"/.env
@@ -88,8 +88,12 @@ NEWT_SECRET=$NEWT_SECRET
 TZ=Europe/Warsaw
 EOF
 
-# --- 6. Docker Compose (Ujednolicone mapowanie /data) ---
+# --- 6. Docker Compose ---
 cat <<EOF > "$INSTALL_DIR"/docker-compose.yml
+networks:
+  media-network:
+    driver: bridge
+
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -105,12 +109,15 @@ services:
       - VPN_TYPE=openvpn
       - PORT_FORWARD_ONLY=on
       - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
     volumes:
       - \${INSTALL_DIR}/config/gluetun:/gluetun
     ports:
-      - 9091:9091/tcp
-      - 51413:51413/tcp
+      - 9091:9091/tcp      # Transmission Web UI
+      - 51413:51413/tcp    # Transmission Torrent Port
       - 51413:51413/udp
+    networks:
+      - media-network
     restart: unless-stopped
 
   transmission:
@@ -125,10 +132,33 @@ services:
       - PASS=admin
       - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
       - TRANSMISSION_INCOMPLETE_DIR=/data/torrents/incomplete
-      - TRANSMISSION_INCOMPLETE_DIR_ENABLED=true
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
       - \${INSTALL_DIR}/data:/data
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - TZ=\${TZ}
+    networks:
+      - media-network
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
+    volumes:
+      - \${INSTALL_DIR}/config/prowlarr:/config
+    networks:
+      - media-network
+    ports:
+      - 9696:9696
     restart: unless-stopped
 
   sonarr:
@@ -141,6 +171,8 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/sonarr:/config
       - \${INSTALL_DIR}/data:/data
+    networks:
+      - media-network
     ports:
       - 8989:8989
     restart: unless-stopped
@@ -155,21 +187,10 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/radarr:/config
       - \${INSTALL_DIR}/data:/data
+    networks:
+      - media-network
     ports:
       - 7878:7878
-    restart: unless-stopped
-
-  prowlarr:
-    image: lscr.io/linuxserver/prowlarr:latest
-    container_name: prowlarr
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-    volumes:
-      - \${INSTALL_DIR}/config/prowlarr:/config
-    ports:
-      - 9696:9696
     restart: unless-stopped
 
   bazarr:
@@ -182,6 +203,8 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/bazarr:/config
       - \${INSTALL_DIR}/data:/data
+    networks:
+      - media-network
     ports:
       - 6767:6767
     restart: unless-stopped
@@ -196,6 +219,8 @@ services:
     volumes:
       - \${INSTALL_DIR}/config/jellyfin:/config
       - \${INSTALL_DIR}/data:/data
+    networks:
+      - media-network
     ports:
       - 8096:8096
     $(echo -e "$GPU_CONFIG")
@@ -210,6 +235,8 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/jellyseerr:/app/config
+    networks:
+      - media-network
     ports:
       - 5055:5055
     restart: unless-stopped
@@ -221,43 +248,40 @@ services:
       - PANGOLIN_ENDPOINT=\${PANGOLIN_URL}
       - NEWT_ID=\${NEWT_ID}
       - NEWT_SECRET=\${NEWT_SECRET}
+    networks:
+      - media-network
     restart: unless-stopped
 EOF
 
 # --- 7. Uruchomienie ---
-log_info "Uruchamianie kontenerów..."
-cd "$INSTALL_DIR" && sudo docker compose up -d
+log_info "Uruchamianie kontenerów (może to potrwać kilka minut)..."
+cd "$INSTALL_DIR" && docker compose up -d
 
 # --- 8. Tworzenie info.md ---
 cat <<EOF > "$INSTALL_DIR"/info.md
-# Perfect Media Stack - Service Information
+# Perfect Media Stack - Podsumowanie
 
-Twoje aplikacje są dostępne pod adresami:
+| Serwis | Adres |
+| :--- | :--- |
+| 🎬 Jellyfin | http://${SERVER_IP}:8096 |
+| 🎫 Jellyseerr | http://${SERVER_IP}:5055 |
+| 📥 Transmission | http://${SERVER_IP}:9091 |
+| 🎥 Radarr | http://${SERVER_IP}:7878 |
+| 📺 Sonarr | http://${SERVER_IP}:8989 |
+| 🔍 Prowlarr | http://${SERVER_IP}:9696 |
+| 📝 Bazarr | http://${SERVER_IP}:6767 |
 
-| Serwis | URL | Poświadczenia |
-| :--- | :--- | :--- |
-| 🎬 Jellyfin | http://${SERVER_IP}:8096 | Zdefiniuj przy starcie |
-| 📥 Transmission | http://${SERVER_IP}:9091 | admin / admin |
-| 🎥 Radarr | http://${SERVER_IP}:7878 | - |
-| 📺 Sonarr | http://${SERVER_IP}:8989 | - |
-| 🔍 Prowlarr | http://${SERVER_IP}:9696 | - |
+## 🛡️ VPN i Port Forwarding
+1. Sprawdź port w logach: \`docker logs gluetun\`
+2. Znajdź linię: \`port forwarded is XXXXX\`.
+3. W Transmission (Ustawienia -> Network) wpisz ten port w "Peer listening port".
 
-## 🚀 KLUCZOWA KONFIGURACJA (Aby uniknąć błędów ścieżek):
+## ⚙️ Konfiguracja Prowlarr + FlareSolverr
+W Prowlarr dodaj FlareSolverr jako Indexer Proxy:
+- Host: \`http://flaresolverr:8191\`
 
-1. **W Radarr/Sonarr (Download Clients):**
-   - Dodaj Transmission (Host: \`gluetun\`, Port: \`9091\`).
-   - W polu **Category** wpisz odpowiednio: \`movies\` (dla Radarr) lub \`tv\` (dla Sonarr).
-   - Dzięki temu pliki trafią do \`/data/torrents/movies\` lub \`/data/torrents/tv\`.
-
-2. **W Radarr/Sonarr (Root Folders):**
-   - Radarr: \`/data/media/movies\`
-   - Sonarr: \`/data/media/tv\`
-
-3. **Dlaczego to działa?**
-   Wszystkie kontenery widzą ten sam folder \`/data\`. Kiedy Transmission pobierze plik do \`/data/torrents/movies\`, Radarr widzi go tam natychmiast i może utworzyć **Hardlink** do biblioteki media bez kopiowania danych.
-
-*Plik wygenerowany: $(date)*
+*Wygenerowano: $(date)*
 EOF
 
-log_success "Instalacja zakończona sukcesem!"
-log_info "Szczegóły znajdziesz w: $INSTALL_DIR/info.md"
+log_success "Instalacja zakończona sukcesem w $INSTALL_DIR!"
+log_info "Wszystkie dane są w jednym miejscu. Hardlinki będą działać automatycznie."
