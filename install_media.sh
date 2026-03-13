@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# --- Color Configuration ---
+# --- Konfiguracja Kolorów ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -11,68 +11,71 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# --- 1. System Update & Upgrade ---
-log_info "Starting full system update..."
-sudo apt update && sudo apt upgrade -y || log_error "System update failed."
+# --- 1. Aktualizacja Systemu ---
+log_info "Aktualizacja systemu..."
+sudo apt update && sudo apt upgrade -y || log_error "Aktualizacja nie powiodła się."
 
-# --- 2. Check and install Docker (official repository) ---
+# --- 2. Instalacja Docker ---
 if ! command -v docker &> /dev/null; then
-    log_info "Installing Docker (official repository, not snap)..."
+    log_info "Instalacja Docker (oficjalne repozytorium)..."
     sudo apt install -y ca-certificates curl gnupg lsb-release
     sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL https://download.download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
-log_success "Docker and Docker Compose are ready."
+log_success "Docker jest gotowy."
 
-# --- 3. Interactive Configuration ---
+# --- 3. Konfiguracja Interaktywna ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION            ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (FIXED)    ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
-# IP Detection
 SERVER_IP=$(hostname -I | awk '{print $1}')
-log_info "Detected server IP: ${SERVER_IP}"
+log_info "Wykryte IP serwera: ${SERVER_IP}"
 
-read -p "Enter installation path [/opt/media-stack]: " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-/opt/media-stack}
+read -p "Ścieżka instalacji [/root/media-stack]: " INSTALL_DIR
+INSTALL_DIR=${INSTALL_DIR:-/root/media-stack}
 
 echo -e "\n--- VPN CONFIGURATION (PROTONVPN) ---"
-echo -e "${YELLOW}NOTE:${NC} Use 'OpenVPN Credentials' from the Proton panel, NOT your main password!"
-read -p "Proton OpenVPN Username: " VPN_USER
-read -s -p "Proton OpenVPN Password: " VPN_PASS
+echo -e "${YELLOW}UWAGA:${NC} Użyj 'OpenVPN Credentials' z panelu Proton, NIE głównego hasła!"
+read -p "Proton Username: " VPN_USER
+read -s -p "Proton Password: " VPN_PASS
 echo ""
 
 echo -e "\n--- PANGOLIN CONFIGURATION (TUNNEL) ---"
 read -p "Pangolin Endpoint: " PANGOLIN_URL
 read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
-echo -e "\n"
+echo ""
 
-# PUID/PGID - Fixed to 1000 for standard LSIO compatibility
+# PUID/PGID - Standard dla LSIO
 PUID=1000
 PGID=1000
 
-# Intelligent QuickSync detection
+# QuickSync detection
 GPU_CONFIG=""
 if [ -d "/dev/dri" ]; then
-    echo -e "${GREEN}Intel graphics support (QuickSync) detected.${NC}"
-    read -p "Enable hardware transcoding in Jellyfin? (y/n): " ENABLE_GPU
+    log_info "Wykryto wsparcie dla Intel QuickSync."
+    read -p "Włączyć transkodowanie sprzętowe w Jellyfin? (y/n): " ENABLE_GPU
     if [[ "$ENABLE_GPU" == "y" ]]; then
         GPU_CONFIG="devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$(stat -c '%g' /dev/dri/renderD128)\""
     fi
 fi
 
-# --- 4. Folder Structure ---
-log_info "Creating folder structure for Hardlinks..."
-sudo mkdir -p "$INSTALL_DIR"/{config,data/{watch,torrents/{movies,tv,incomplete},media/{movies,tv}}}
-# Set ownership to 1000:1000 to match container user 'abc'
+# --- 4. Struktura Katalogów (Pod Hardlinki) ---
+log_info "Tworzenie struktury katalogów i ustawianie uprawnień..."
+# Tworzymy czystą strukturę
+sudo mkdir -p "$INSTALL_DIR"/{config,data,watch}
+sudo mkdir -p "$INSTALL_DIR"/config/{gluetun,transmission,sonarr,radarr,prowlarr,bazarr,jellyfin,jellyseerr}
+sudo mkdir -p "$INSTALL_DIR"/data/{torrents/{movies,tv,incomplete},media/{movies,tv}}
+
+# Kluczowe: uprawnienia dla użytkownika 1000 (abc w kontenerach)
 sudo chown -R 1000:1000 "$INSTALL_DIR"
 sudo chmod -R 775 "$INSTALL_DIR"
 
-# --- 5. Environment File (.env) ---
+# --- 5. Plik .env ---
 cat <<EOF > "$INSTALL_DIR"/.env
 PUID=$PUID
 PGID=$PGID
@@ -85,8 +88,7 @@ NEWT_SECRET=$NEWT_SECRET
 TZ=Europe/Warsaw
 EOF
 
-# --- 6. Docker Compose File (docker-compose.yml) ---
-# Unified volume path /data for ALL containers to avoid Remote Path Mapping
+# --- 6. Docker Compose (Ujednolicone mapowanie /data) ---
 cat <<EOF > "$INSTALL_DIR"/docker-compose.yml
 services:
   gluetun:
@@ -115,9 +117,6 @@ services:
     image: lscr.io/linuxserver/transmission:latest
     container_name: transmission
     network_mode: "service:gluetun"
-    depends_on:
-      gluetun:
-        condition: service_started
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
@@ -127,10 +126,9 @@ services:
       - TRANSMISSION_DOWNLOAD_DIR=/data/torrents
       - TRANSMISSION_INCOMPLETE_DIR=/data/torrents/incomplete
       - TRANSMISSION_INCOMPLETE_DIR_ENABLED=true
-      - TRANSMISSION_WATCH_DIR=/data/watch
     volumes:
       - \${INSTALL_DIR}/config/transmission:/config
-      - \${INSTALL_DIR}/data:/data  # Unified path
+      - \${INSTALL_DIR}/data:/data
     restart: unless-stopped
 
   sonarr:
@@ -142,7 +140,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/sonarr:/config
-      - \${INSTALL_DIR}/data:/data  # Unified path
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 8989:8989
     restart: unless-stopped
@@ -156,23 +154,14 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/radarr:/config
-      - \${INSTALL_DIR}/data:/data  # Unified path
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 7878:7878
-    restart: unless-stopped
-
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: flaresolverr
-    ports:
-      - 8191:8191
     restart: unless-stopped
 
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr
-    depends_on:
-      - flaresolverr
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
@@ -192,7 +181,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/bazarr:/config
-      - \${INSTALL_DIR}/data:/data  # Unified path
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 6767:6767
     restart: unless-stopped
@@ -206,7 +195,7 @@ services:
       - TZ=\${TZ}
     volumes:
       - \${INSTALL_DIR}/config/jellyfin:/config
-      - \${INSTALL_DIR}/data:/data  # Unified path
+      - \${INSTALL_DIR}/data:/data
     ports:
       - 8096:8096
     $(echo -e "$GPU_CONFIG")
@@ -215,9 +204,6 @@ services:
   jellyseerr:
     image: fallenbagel/jellyseerr:latest
     container_name: jellyseerr
-    depends_on:
-      - sonarr
-      - radarr
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
@@ -236,85 +222,42 @@ services:
       - NEWT_ID=\${NEWT_ID}
       - NEWT_SECRET=\${NEWT_SECRET}
     restart: unless-stopped
-
-  wud:
-    image: fmartinou/whats-up-docker:latest
-    container_name: wud
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - 3000:3000
-    restart: unless-stopped
 EOF
 
-# --- 7. Start ---
-log_info "Starting containers..."
+# --- 7. Uruchomienie ---
+log_info "Uruchamianie kontenerów..."
 cd "$INSTALL_DIR" && sudo docker compose up -d
 
-# --- 8. Create info.md ---
-log_info "Creating info.md with service details..."
+# --- 8. Tworzenie info.md ---
 cat <<EOF > "$INSTALL_DIR"/info.md
 # Perfect Media Stack - Service Information
 
-Your applications are available at the following addresses:
+Twoje aplikacje są dostępne pod adresami:
 
-| Service | URL | Credentials |
+| Serwis | URL | Poświadczenia |
 | :--- | :--- | :--- |
-| 🎬 Jellyfin (Media) | http://${SERVER_IP}:8096 | User-defined |
-| 🎫 Jellyseerr (Requests) | http://${SERVER_IP}:5055 | User-defined |
-| 📥 Transmission (Downloads) | http://${SERVER_IP}:9091 | admin / admin |
-| 🎥 Radarr (Movies) | http://${SERVER_IP}:7878 | - |
-| 📺 Sonarr (TV Shows) | http://${SERVER_IP}:8989 | - |
-| 🔍 Prowlarr (Indexers) | http://${SERVER_IP}:9696 | - |
-| 📝 Bazarr (Subtitles) | http://${SERVER_IP}:6767 | - |
-| 🔄 WUD (Updates) | http://${SERVER_IP}:3000 | - |
+| 🎬 Jellyfin | http://${SERVER_IP}:8096 | Zdefiniuj przy starcie |
+| 📥 Transmission | http://${SERVER_IP}:9091 | admin / admin |
+| 🎥 Radarr | http://${SERVER_IP}:7878 | - |
+| 📺 Sonarr | http://${SERVER_IP}:8989 | - |
+| 🔍 Prowlarr | http://${SERVER_IP}:9696 | - |
 
-## 🛡️ VPN Verification
-To verify if your traffic is securely routed through Proton VPN, run:
-\`docker exec transmission curl -s https://ipinfo.io\`
-The output should show **Proton AG** or **Datacamp Limited** in the 'org' field.
+## 🚀 KLUCZOWA KONFIGURACJA (Aby uniknąć błędów ścieżek):
 
-## 🚀 Critical Post-Installation Steps
+1. **W Radarr/Sonarr (Download Clients):**
+   - Dodaj Transmission (Host: \`gluetun\`, Port: \`9091\`).
+   - W polu **Category** wpisz odpowiednio: \`movies\` (dla Radarr) lub \`tv\` (dla Sonarr).
+   - Dzięki temu pliki trafią do \`/data/torrents/movies\` lub \`/data/torrents/tv\`.
 
-1. **Internal Networking (IMPORTANT):**
-   - Always use **container names** (e.g., \`http://sonarr:8989\`, \`http://radarr:7878\`, \`http://prowlarr:9696\`) instead of IP addresses when connecting apps to each other.
-   - For Download Client in Sonarr/Radarr, use host: \`gluetun\` (port 9091).
-2. **Transmission Setup:**
-   - Check \`docker logs gluetun\` for "port forwarded is XXXXX".
-   - In Transmission Web UI (Settings -> Network), enter that port number in "Peer listening port" and verify it is **Open**.
-3. **Library Paths (NO MAPPING NEEDED):**
-   - All apps use the unified \`/data\` path.
-   - In Sonarr set Root Folder: \`/data/media/tv\`.
-   - In Radarr set Root Folder: \`/data/media/movies\`.
-4. **FlareSolverr:**
-   - In Prowlarr (Settings -> Indexers -> Add Proxy), use host: \`http://flaresolverr:8191\`.
+2. **W Radarr/Sonarr (Root Folders):**
+   - Radarr: \`/data/media/movies\`
+   - Sonarr: \`/data/media/tv\`
 
-*File generated on: $(date)*
+3. **Dlaczego to działa?**
+   Wszystkie kontenery widzą ten sam folder \`/data\`. Kiedy Transmission pobierze plik do \`/data/torrents/movies\`, Radarr widzi go tam natychmiast i może utworzyć **Hardlink** do biblioteki media bez kopiowania danych.
+
+*Plik wygenerowany: $(date)*
 EOF
 
-# --- 9. Summary ---
-clear
-echo -e "${GREEN}====================================================${NC}"
-echo -e "${GREEN}      INSTALLATION COMPLETED SUCCESSFULLY!          ${NC}"
-echo -e "${GREEN}====================================================${NC}"
-echo -e "\nYour applications are available at the following addresses:\n"
-
-echo -e "🎬  ${BLUE}Jellyfin (Media):${NC}       http://${SERVER_IP}:8096"
-echo -e "🎫  ${BLUE}Jellyseerr (Requests):${NC}    http://${SERVER_IP}:5055"
-echo -e "📥  ${BLUE}Transmission (Downloads):${NC} http://${SERVER_IP}:9091 (Login: admin / admin)"
-echo -e "🎥  ${BLUE}Radarr (Movies):${NC}         http://${SERVER_IP}:7878"
-echo -e "📺  ${BLUE}Sonarr (TV Shows):${NC}       http://${SERVER_IP}:8989"
-echo -e "🔍  ${BLUE}Prowlarr (Indexers):${NC}    http://${SERVER_IP}:9696"
-echo -e "📝  ${BLUE}Bazarr (Subtitles):${NC}        http://${SERVER_IP}:6767"
-echo -e "🔄  ${BLUE}WUD (Updates):${NC}           http://${SERVER_IP}:3000"
-
-echo -e "\n${YELLOW}🛡️  VPN VERIFICATION:${NC}"
-echo -e "Run: ${CYAN}docker exec transmission curl -s https://ipinfo.io${NC}"
-
-echo -e "\n${YELLOW}🚀 CRITICAL POST-INSTALLATION STEPS:${NC}"
-echo -e "1. ${GREEN}Internal Networking:${NC} Use **container names** (e.g. ${CYAN}http://sonarr:8989${NC}) instead of IPs for app-to-app connections."
-echo -e "2. ${GREEN}Port Forwarding:${NC} Check ${CYAN}docker logs gluetun${NC} for port number and set it in Transmission Network settings."
-echo -e "3. ${GREEN}Root Folders:${NC} In Sonarr/Radarr set: ${CYAN}/data/media/tv${NC} and ${CYAN}/data/media/movies${NC}."
-echo -e "4. ${GREEN}Download Client:${NC} Use host ${CYAN}gluetun${NC} (port 9091)."
-echo -e "5. ${GREEN}Full Guide:${NC} All details saved in ${CYAN}$INSTALL_DIR/info.md${NC}."
-echo -e "====================================================\n"
+log_success "Instalacja zakończona sukcesem!"
+log_info "Szczegóły znajdziesz w: $INSTALL_DIR/info.md"
