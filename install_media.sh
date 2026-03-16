@@ -89,6 +89,84 @@ read -p "Newt ID: " NEWT_ID
 read -s -p "Newt Secret: " NEWT_SECRET
 echo ""
 
+# Extract base domain from Pangolin URL (e.g., pangolin.wphl.eu -> wphl.eu)
+PANGOLIN_DOMAIN="${PANGOLIN_URL#pangolin.}"
+if [ "$PANGOLIN_DOMAIN" = "$PANGOLIN_URL" ]; then
+    # No "pangolin." prefix found, try to extract domain
+    PANGOLIN_DOMAIN="${PANGOLIN_URL#*.}"
+fi
+
+# Pangolin service selection
+echo -e "\n--- PANGOLIN SERVICES ---"
+echo "Select services to expose via Pangolin (default: 3,4):"
+echo "  1. Sonarr       5. Prowlarr"
+echo "  2. Radarr       6. Bazarr"
+echo "  3. Jellyfin     7. WUD"
+echo "  4. Jellyseerr   8. Transmission"
+read -p "Selection (comma-separated, e.g. 1,3,4 or 'all') [3,4]: " PANGOLIN_SVCS
+PANGOLIN_SVCS=${PANGOLIN_SVCS:-"3,4"}
+
+# Define Pangolin services: index:service:hostname:port:name
+declare -A PANGOLIN_SERVICE_MAP
+PANGOLIN_SERVICE_MAP[1]="sonarr:sonarr:8989"
+PANGOLIN_SERVICE_MAP[2]="radarr:radarr:7878"
+PANGOLIN_SERVICE_MAP[3]="jellyfin:jellyfin:8096"
+PANGOLIN_SERVICE_MAP[4]="jellyseerr:jellyseerr:5055"
+PANGOLIN_SERVICE_MAP[5]="prowlarr:prowlarr:9696"
+PANGOLIN_SERVICE_MAP[6]="bazarr:bazarr:6767"
+PANGOLIN_SERVICE_MAP[7]="wud:wud:3000"
+PANGOLIN_SERVICE_MAP[8]="transmission:gluetun:9099"
+
+# Generate labels for selected services
+SONARR_LABELS=""
+RADARR_LABELS=""
+JELLYFIN_LABELS=""
+JELLYSEERR_LABELS=""
+PROWLARR_LABELS=""
+BAZARR_LABELS=""
+WUD_LABELS=""
+TRANSMISSION_LABELS=""
+
+generate_pangolin_labels() {
+    local service=$1
+    local hostname=$2
+    local port=$3
+    local full_domain="${service}.${PANGOLIN_DOMAIN}"
+    
+    echo "      - pangolin.public-resources.${service}.name=${service^}"
+    echo "      - pangolin.public-resources.${service}.full-domain=${full_domain}"
+    echo "      - pangolin.public-resources.${service}.protocol=http"
+    echo "      - pangolin.public-resources.${service}.targets[0].method=http"
+    echo "      - pangolin.public-resources.${service}.targets[0].hostname=${hostname}"
+    echo "      - pangolin.public-resources.${service}.targets[0].port=${port}"
+}
+
+# Parse selection and generate labels
+IFS=',' read -ra SELECTED <<< "$PANGOLIN_SVCS"
+for idx in "${SELECTED[@]}"; do
+    idx=$(echo $idx | xargs)  # trim whitespace
+    if [[ -n "${PANGOLIN_SERVICE_MAP[$idx]}" ]]; then
+        IFS=':' read -r svc host port <<< "${PANGOLIN_SERVICE_MAP[$idx]}"
+        case $svc in
+            sonarr)     SONARR_LABELS=$(generate_pangolin_labels "sonarr" "$host" "$port") ;;
+            radarr)     RADARR_LABELS=$(generate_pangolin_labels "radarr" "$host" "$port") ;;
+            jellyfin)   JELLYFIN_LABELS=$(generate_pangolin_labels "jellyfin" "$host" "$port") ;;
+            jellyseerr) JELLYSEERR_LABELS=$(generate_pangolin_labels "jellyseerr" "$host" "$port") ;;
+            prowlarr)   PROWLARR_LABELS=$(generate_pangolin_labels "prowlarr" "$host" "$port") ;;
+            bazarr)     BAZARR_LABELS=$(generate_pangolin_labels "bazarr" "$host" "$port") ;;
+            wud)        WUD_LABELS=$(generate_pangolin_labels "wud" "$host" "$port") ;;
+            transmission) TRANSMISSION_LABELS=$(generate_pangolin_labels "transmission" "$host" "$port") ;;
+        esac
+    fi
+done
+
+# Determine if any Pangolin services are selected
+if [[ -n "$SONARR_LABELS" || -n "$RADARR_LABELS" || -n "$JELLYFIN_LABELS" || -n "$JELLYSEERR_LABELS" || -n "$PROWLARR_LABELS" || -n "$BAZARR_LABELS" || -n "$WUD_LABELS" || -n "$TRANSMISSION_LABELS" ]]; then
+    NEWT_DOCKER_SOCKET="      - /var/run/docker.sock:/var/run/docker.sock"
+    NEWT_DOCKER_ENV="      - DOCKER_SOCKET=/var/run/docker.sock"
+    log_info "Pangolin auto-discovery enabled for selected services."
+fi
+
 echo -e "\n--- TRANSMISSION ---"
 # Generate secure default password instead of 'admin'
 DEFAULT_TR_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
@@ -191,14 +269,16 @@ services:
     container_name: transmission
     network_mode: "service:gluetun"
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-      - USER=\${TR_USER}
-      - PASS=\${TR_PASS}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - USER=${TR_USER}
+      - PASS=${TR_PASS}
     volumes:
-      - \${INSTALL_DIR}/config/transmission:/config
-      - \${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/config/transmission:/config
+      - ${INSTALL_DIR}/data:/data
+    labels:
+${TRANSMISSION_LABELS:-      - pangolin.public-resources.transmission.enabled=false}
     restart: unless-stopped
 
   flaresolverr:
@@ -216,79 +296,89 @@ services:
     depends_on:
       - flaresolverr
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/prowlarr:/config
+      - ${INSTALL_DIR}/config/prowlarr:/config
     networks:
       - media-network
     ports:
       - 9696:9696
+    labels:
+${PROWLARR_LABELS:-      - pangolin.public-resources.prowlarr.enabled=false}
     restart: unless-stopped
 
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
     container_name: sonarr
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/sonarr:/config
-      - \${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/config/sonarr:/config
+      - ${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
       - 8989:8989
+    labels:
+${SONARR_LABELS:-      - pangolin.public-resources.sonarr.enabled=false}
     restart: unless-stopped
 
   radarr:
     image: lscr.io/linuxserver/radarr:latest
     container_name: radarr
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/radarr:/config
-      - \${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/config/radarr:/config
+      - ${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
       - 7878:7878
+    labels:
+${RADARR_LABELS:-      - pangolin.public-resources.radarr.enabled=false}
     restart: unless-stopped
 
   bazarr:
     image: lscr.io/linuxserver/bazarr:latest
     container_name: bazarr
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/bazarr:/config
-      - \${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/config/bazarr:/config
+      - ${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
       - 6767:6767
+    labels:
+${BAZARR_LABELS:-      - pangolin.public-resources.bazarr.enabled=false}
     restart: unless-stopped
 
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/jellyfin:/config
-      - \${INSTALL_DIR}/data:/data
+      - ${INSTALL_DIR}/config/jellyfin:/config
+      - ${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
       - 8096:8096
+    labels:
+${JELLYFIN_LABELS:-      - pangolin.public-resources.jellyfin.enabled=false}
 $(echo -e "$GPU_CONFIG")
     restart: unless-stopped
 
@@ -296,24 +386,29 @@ $(echo -e "$GPU_CONFIG")
     image: fallenbagel/jellyseerr:latest
     container_name: jellyseerr
     environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
     volumes:
-      - \${INSTALL_DIR}/config/jellyseerr:/app/config
+      - ${INSTALL_DIR}/config/jellyseerr:/app/config
     networks:
       - media-network
     ports:
       - 5055:5055
+    labels:
+${JELLYSEERR_LABELS:-      - pangolin.public-resources.jellyseerr.enabled=false}
     restart: unless-stopped
 
   newt:
     image: fosrl/newt:latest
     container_name: newt
+    volumes:
+${NEWT_DOCKER_SOCKET:-#      - /var/run/docker.sock:/var/run/docker.sock}
     environment:
-      - PANGOLIN_ENDPOINT=\${PANGOLIN_URL}
-      - NEWT_ID=\${NEWT_ID}
-      - NEWT_SECRET=\${NEWT_SECRET}
+      - PANGOLIN_ENDPOINT=${PANGOLIN_URL}
+      - NEWT_ID=${NEWT_ID}
+      - NEWT_SECRET=${NEWT_SECRET}
+${NEWT_DOCKER_ENV:-#      - DOCKER_SOCKET=/var/run/docker.sock}
     networks:
       - media-network
     restart: unless-stopped
@@ -322,7 +417,7 @@ $(echo -e "$GPU_CONFIG")
     image: fmartinou/whats-up-docker:latest
     container_name: wud
     environment:
-      - TZ=\${TZ}
+      - TZ=${TZ}
       - WUD_LOG_LEVEL=INFO
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -330,6 +425,8 @@ $(echo -e "$GPU_CONFIG")
       - 3000:3000
     networks:
       - media-network
+    labels:
+${WUD_LABELS:-      - pangolin.public-resources.wud.enabled=false}
     restart: unless-stopped
 EOF
 
