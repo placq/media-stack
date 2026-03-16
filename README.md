@@ -31,6 +31,14 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 
 ## 🛠️ Installation
 
+**One-line Installation (Recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/install_media.sh | sudo bash
+```
+
+**Manual Installation:**
+
 1. **Clone the repository to your server:**
 
    ```bash
@@ -42,7 +50,7 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 
    ```bash
    chmod +x install_media.sh
-   ./install_media.sh
+   sudo ./install_media.sh
    ```
 
 3. **Follow the interactive prompts** to configure your VPN, Pangolin credentials, and installation path (defaults to `/opt/media-stack`).
