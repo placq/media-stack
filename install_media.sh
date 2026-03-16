@@ -53,7 +53,7 @@ log_success "Docker and Docker Compose are ready."
 # --- 4. Interactive Configuration ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.3)     ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.4)     ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
