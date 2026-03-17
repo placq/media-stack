@@ -98,13 +98,13 @@ fi
 
 # Pangolin service selection
 echo -e "\n--- PANGOLIN SERVICES ---"
-echo "Select services to expose via Pangolin (default: 3,4):"
+echo "Select services to expose via Pangolin (default: none):"
 echo "  1. Sonarr       5. Prowlarr"
 echo "  2. Radarr       6. Bazarr"
 echo "  3. Jellyfin     7. WUD"
 echo "  4. Jellyseerr   8. Transmission"
-read -p "Selection (comma-separated, e.g. 1,3,4 or 'all') [3,4]: " PANGOLIN_SVCS
-PANGOLIN_SVCS=${PANGOLIN_SVCS:-"3,4"}
+read -p "Selection (comma-separated, e.g. 1,3,4 or 'all') [none]: " PANGOLIN_SVCS
+PANGOLIN_SVCS=${PANGOLIN_SVCS:-""}
 
 # Define Pangolin services: index:service:hostname:port:name
 declare -A PANGOLIN_SERVICE_MAP
