@@ -8,7 +8,7 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 - **VPN Protection:** All download traffic (Transmission) is routed through a **Gluetun** container using ProtonVPN.
 - **Hardware Acceleration:** Automatic detection and configuration of Intel QuickSync for Jellyfin.
 - **Hardlink Support:** Pre-configures a unified `/data` folder structure optimized for atomic moves and hardlinks.
-- **Tunnel Ready:** Built-in support for **Pangolin** (via Newt) for secure remote access.
+- **Tunnel Ready:** Built-in support for **Pangolin** (via Newt) for secure remote access. During installation, you can selectively choose which services to expose (by default, no services are exposed).
 - **Cloudflare Bypass:** Includes **FlareSolverr** to assist Prowlarr in indexing protected sites.
 - **Auto-generated Docs:** Creates an `important_info.md` file with all your local IP addresses, ports, and internal container communication guidelines.
 - **Automatic Updates:** Includes **What's Up Docker (WUD)** to keep your stack up to date.
