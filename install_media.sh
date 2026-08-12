@@ -13,12 +13,33 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
-on_error() { echo -e "${RED}[ERROR]${NC} Installation failed at line $1." >&2; }
-trap 'on_error "$LINENO"' ERR
+
+JELLYSEERR_WAS_RUNNING=false
+JELLYSEERR_CONTAINER_FOUND=false
+cleanup_on_exit() {
+    local status=$1 line=$2
+    if ((status != 0)); then
+        echo -e "${RED}[ERROR]${NC} Installation failed at line $line." >&2
+        if $JELLYSEERR_WAS_RUNNING && command -v docker >/dev/null; then
+            docker start jellyseerr >/dev/null 2>&1 || true
+            log_warn "The previous Jellyseerr container was restarted."
+        fi
+    fi
+}
+trap 'cleanup_on_exit "$?" "$LINENO"' EXIT
 
 [[ $EUID -eq 0 ]] || log_error "Run this installer with sudo or as root."
 [[ -t 0 ]] || log_error "Interactive terminal required. Download the script first; do not pipe it directly to bash."
+[[ "$(ps -p 1 -o comm=)" == systemd ]] || log_error "This installer requires systemd as PID 1."
 
+if [[ "$(systemd-detect-virt --container 2>/dev/null || true)" == lxc ]]; then
+    if [[ ! -c /dev/net/tun || ! -r /dev/net/tun || ! -w /dev/net/tun ]]; then
+        log_error "LXC has no usable /dev/net/tun. On the Proxmox host run: pct set CTID --dev0 /dev/net/tun; pct set CTID --features keyctl=1,nesting=1; then fully restart the container."
+    fi
+fi
+[[ -c /dev/net/tun ]] || log_error "/dev/net/tun is required by Gluetun and Tailscale."
+
+# shellcheck disable=SC1091
 source /etc/os-release
 case "${ID:-}" in
     ubuntu|debian) ;;
@@ -52,10 +73,23 @@ INSTALL_DIR=${INSTALL_DIR:-/opt/media-stack}
 [[ "$INSTALL_DIR" == /* ]] || log_error "Installation path must be absolute."
 [[ "$INSTALL_DIR" != *"'"* && "$INSTALL_DIR" != *$'\n'* ]] || log_error "Installation path cannot contain apostrophes or newlines."
 
+read -r -p "External backup directory (mounted NAS, empty to disable): " OFFSITE_BACKUP_DIR
+if [[ -n "$OFFSITE_BACKUP_DIR" ]]; then
+    [[ "$OFFSITE_BACKUP_DIR" == /* ]] || log_error "External backup directory must be absolute."
+    [[ "$OFFSITE_BACKUP_DIR" != *"'"* && "$OFFSITE_BACKUP_DIR" != *$'\n'* ]] || log_error "External backup directory cannot contain apostrophes or newlines."
+    [[ -d "$OFFSITE_BACKUP_DIR" && -w "$OFFSITE_BACKUP_DIR" ]] || log_error "Mount the external backup directory and make it writable before continuing."
+fi
+
 log_info "Installing required host packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y -q ca-certificates curl gnupg iproute2 jq openssl tar util-linux
+apt-get install -y -q ca-certificates curl gnupg iproute2 jq openssl tar unattended-upgrades util-linux
+
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'AUTO_UPGRADES'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+AUTO_UPGRADES
+systemctl enable --now unattended-upgrades.service
 
 install_docker() {
     log_info "Configuring the official Docker repository for ${ID} ${VERSION_CODENAME}..."
@@ -79,9 +113,11 @@ if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; t
     install_docker
 fi
 docker info >/dev/null 2>&1 || log_error "Docker daemon is not available."
+log_info "Verifying nested Docker support..."
+docker run --rm hello-world >/dev/null || log_error "Docker cannot start containers. For Proxmox LXC, enable nesting and keyctl, then fully restart the LXC."
 
 if ! command -v tailscale >/dev/null; then
-    log_info "Installing Tailscale on the host..."
+    log_info "Installing Tailscale in this system (inside the media LXC when used on Proxmox)..."
     TAILSCALE_INSTALLER=$(mktemp)
     curl -fsSL https://tailscale.com/install.sh -o "$TAILSCALE_INSTALLER"
     sh "$TAILSCALE_INSTALLER"
@@ -159,8 +195,19 @@ DIRS=(
 )
 for dir in "${DIRS[@]}"; do mkdir -p "$INSTALL_DIR/$dir"; done
 
+if docker container inspect jellyseerr >/dev/null 2>&1; then
+    JELLYSEERR_CONTAINER_FOUND=true
+    if [[ "$(docker inspect --format '{{.State.Running}}' jellyseerr)" == true ]]; then
+        log_info "Stopping the previous Jellyseerr container for a consistent migration..."
+        docker stop jellyseerr >/dev/null
+        JELLYSEERR_WAS_RUNNING=true
+    fi
+fi
+
 if [[ -d "$INSTALL_DIR/config/jellyseerr" && ! -e "$INSTALL_DIR/config/seerr/settings.json" ]]; then
     log_info "Migrating the Jellyseerr configuration directory to Seerr..."
+    tar -czf "$INSTALL_DIR/backups/jellyseerr-before-seerr-$(date +%Y%m%d-%H%M%S).tar.gz" \
+        -C "$INSTALL_DIR" config/jellyseerr
     cp -a "$INSTALL_DIR/config/jellyseerr/." "$INSTALL_DIR/config/seerr/"
 fi
 
@@ -193,6 +240,7 @@ fi
     printf "TR_USER='%s'\n" "$TR_USER"
     printf "TR_PASS='%s'\n" "$TR_PASS"
     printf "UPDATE_DELAY_DAYS='7'\n"
+    printf "OFFSITE_BACKUP_DIR='%s'\n" "$OFFSITE_BACKUP_DIR"
 } > "$INSTALL_DIR/.env"
 chmod 600 "$INSTALL_DIR/.env"
 
@@ -422,19 +470,8 @@ EOF
 
 curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/update_stack.sh -o "$INSTALL_DIR/update_stack.sh"
 chmod 750 "$INSTALL_DIR/update_stack.sh"
-
-cat > "$INSTALL_DIR/port.sh" <<'PORT_HELPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-PORT=$(docker exec gluetun cat /tmp/gluetun/forwarded_port 2>/dev/null || true)
-if [[ -n "$PORT" ]]; then
-    echo "Current ProtonVPN forwarded port: $PORT"
-else
-    echo "No forwarded port is available yet. Check: docker logs gluetun"
-    exit 1
-fi
-PORT_HELPER
-chmod 750 "$INSTALL_DIR/port.sh"
+curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/sync_transmission_port.sh -o "$INSTALL_DIR/sync_transmission_port.sh"
+chmod 750 "$INSTALL_DIR/sync_transmission_port.sh"
 
 cat > "$INSTALL_DIR/important_info.md" <<EOF
 # Media Stack
@@ -472,7 +509,11 @@ Use category \`movies\` in Radarr and \`tv\` in Sonarr. All download and media p
 
 ## Automatic updates
 
-The stack checks for updates every night. A candidate image must remain unchanged for seven days before installation. Immediately before updating, the stack is stopped and its configuration is backed up. Failed health checks trigger an automatic rollback.
+The stack checks for updates every night. Candidates mature independently in safe service groups and must remain unchanged for seven days before installation. Immediately before updating, the stack is stopped and its configuration is backed up${OFFSITE_BACKUP_DIR:+, including a copy in ${OFFSITE_BACKUP_DIR}}. Failed stability checks trigger an automatic rollback.
+
+## Transmission port forwarding
+
+The ProtonVPN forwarded port is synchronized with Transmission automatically every minute. No manual port script or panel action is needed.
 EOF
 
 chown -R "$PUID:$PGID" "$INSTALL_DIR/config" "$INSTALL_DIR/data"
@@ -486,7 +527,14 @@ chmod 640 "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/important_info.md"
 log_info "Validating Docker Compose configuration..."
 cd "$INSTALL_DIR"
 docker compose config --quiet
-docker compose up -d
+docker compose up -d --wait --wait-timeout 300
+
+if $JELLYSEERR_CONTAINER_FOUND; then
+    log_info "Seerr is healthy; removing the previous Jellyseerr container..."
+    docker rm jellyseerr >/dev/null
+    JELLYSEERR_WAS_RUNNING=false
+fi
+docker compose up -d --remove-orphans
 
 log_info "Configuring private Tailscale access..."
 for port in 8096 5055 9091 7878 8989 9696 6767; do
@@ -520,8 +568,33 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+cat > /etc/systemd/system/media-stack-port-sync.service <<EOF
+[Unit]
+Description=Synchronize ProtonVPN forwarded port with Transmission
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory="${INSTALL_DIR}"
+ExecStart="${INSTALL_DIR}/sync_transmission_port.sh"
+EOF
+
+cat > /etc/systemd/system/media-stack-port-sync.timer <<'EOF'
+[Unit]
+Description=Periodic Transmission port synchronization
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=1m
+RandomizedDelaySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
-systemctl enable --now media-stack-update.timer
+systemctl enable --now media-stack-update.timer media-stack-port-sync.timer
 
 log_success "Media Stack installed in $INSTALL_DIR."
 echo
