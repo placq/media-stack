@@ -472,6 +472,7 @@ curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/update_stack
 chmod 750 "$INSTALL_DIR/update_stack.sh"
 curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/sync_transmission_port.sh -o "$INSTALL_DIR/sync_transmission_port.sh"
 chmod 750 "$INSTALL_DIR/sync_transmission_port.sh"
+rm -f "$INSTALL_DIR/port.sh"
 
 cat > "$INSTALL_DIR/important_info.md" <<EOF
 # Media Stack
