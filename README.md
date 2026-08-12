@@ -56,14 +56,6 @@ bash "$installer"
 rm -f "$installer"
 ```
 
-Jeśli chcesz pobrać tylko ten jeden plik bez żadnego klonowania repo:
-
-```bash
-wget -O proxmox_lxc.sh https://raw.githubusercontent.com/placq/media-stack/main/proxmox_lxc.sh
-chmod +x proxmox_lxc.sh
-bash proxmox_lxc.sh
-```
-
 Nie uruchamiaj tego polecenia na laptopie ani stacji roboczej. Provisioner ma
 twardą kontrolę środowiska i zakończy się, jeśli nie wykryje hosta Proxmox VE.
 
