@@ -1,243 +1,213 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# --- Color Configuration ---
+set -Eeuo pipefail
+umask 027
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+on_error() { echo -e "${RED}[ERROR]${NC} Installation failed at line $1." >&2; }
+trap 'on_error "$LINENO"' ERR
 
-# --- 0. Permission and Environment Check ---
-if [[ $EUID -ne 0 ]]; then
-   log_error "This script must be run with root privileges (sudo)."
-fi
+[[ $EUID -eq 0 ]] || log_error "Run this installer with sudo or as root."
+[[ -t 0 ]] || log_error "Interactive terminal required. Download the script first; do not pipe it directly to bash."
 
-# Detect real user (behind sudo or root)
-REAL_USER=${SUDO_USER:-$USER}
+source /etc/os-release
+case "${ID:-}" in
+    ubuntu|debian) ;;
+    *) log_error "Supported systems: Ubuntu and Debian." ;;
+esac
+[[ -n "${VERSION_CODENAME:-}" ]] || log_error "Unable to determine the OS codename."
+
+REAL_USER=${SUDO_USER:-root}
 PUID=$(id -u "$REAL_USER")
 PGID=$(id -g "$REAL_USER")
-TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/London")
+TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/Warsaw")
 
-# --- 1. Pre-Flight Port Check ---
-log_info "Running pre-flight checks..."
-REQUIRED_PORTS=(8096 5055 9091 7878 8989 9696 6767)
-for port in "${REQUIRED_PORTS[@]}"; do
-    if ss -tuln | grep -q ":$port "; then
-        log_error "Port $port is already in use! Please stop the conflicting service and try again."
+if [[ "$PUID" -eq 0 ]]; then
+    if getent passwd 1000 >/dev/null; then
+        REAL_USER=$(getent passwd 1000 | cut -d: -f1)
+    else
+        id media &>/dev/null || useradd -U -m -s /usr/sbin/nologin media
+        REAL_USER=media
     fi
-done
-log_success "All required ports are available."
-
-# --- 2. System Update ---
-log_info "Updating package lists..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update && apt-get upgrade -y -q || log_error "System update failed."
-
-# --- 3. Docker Installation ---
-if ! command -v docker &> /dev/null; then
-    log_info "Installing Docker (official repository)..."
-    apt-get install -y -q ca-certificates curl gnupg lsb-release
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --yes --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt-get update && apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    PUID=$(id -u "$REAL_USER")
+    PGID=$(id -g "$REAL_USER")
 fi
-log_success "Docker and Docker Compose are ready."
 
-# --- 4. Interactive Configuration ---
 clear
 echo -e "${BLUE}===========================================${NC}"
-echo -e "${BLUE}       MEDIA STACK INSTALLATION (v2.4)     ${NC}"
+echo -e "${BLUE}       MEDIA STACK INSTALLATION (v3.0)     ${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
-SERVER_IP=$(hostname -I | awk '{print $1}')
-log_info "Detected Server IP: ${SERVER_IP}"
-log_info "User: ${REAL_USER} (PUID: ${PUID}, PGID: ${PGID})"
-log_info "Timezone: ${TZ}"
-
-# Avoid running containers as root (PUID 0)
-if [ "$PUID" -eq 0 ]; then
-    log_warn "Detected root user. Running containers as root is not recommended."
-    read -p "Create a dedicated 'media' user (UID 1000) for containers? (Y/n): " CREATE_USER
-    if [[ "$CREATE_USER" != "n" && "$CREATE_USER" != "N" ]]; then
-        if ! id "media" &>/dev/null; then
-            useradd -u 1000 -U -d /opt/media-stack -s /bin/false media
-        fi
-        PUID=$(id -u media)
-        PGID=$(id -g media)
-        log_success "Using PUID: $PUID, PGID: $PGID (User: media)"
-    fi
-fi
-
-read -p "Installation path [/opt/media-stack]: " INSTALL_DIR
+read -r -p "Installation path [/opt/media-stack]: " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-/opt/media-stack}
+[[ "$INSTALL_DIR" == /* ]] || log_error "Installation path must be absolute."
+[[ "$INSTALL_DIR" != *"'"* && "$INSTALL_DIR" != *$'\n'* ]] || log_error "Installation path cannot contain apostrophes or newlines."
 
-echo -e "\n--- VPN (PROTONVPN) ---"
-read -p "Proton Username (OpenVPN): " VPN_USER
-read -s -p "Proton Password (OpenVPN): " VPN_PASS
-echo ""
+log_info "Installing required host packages..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y -q ca-certificates curl gnupg iproute2 jq openssl tar util-linux
 
-echo -e "\n--- PANGOLIN (TUNNEL) ---"
-read -p "Pangolin Endpoint: " PANGOLIN_URL
-read -p "Newt ID: " NEWT_ID
-read -s -p "Newt Secret: " NEWT_SECRET
-echo ""
-
-# Extract base domain from Pangolin URL (e.g., pangolin.wphl.eu -> wphl.eu)
-PANGOLIN_DOMAIN="${PANGOLIN_URL#pangolin.}"
-if [ "$PANGOLIN_DOMAIN" = "$PANGOLIN_URL" ]; then
-    # No "pangolin." prefix found, try to extract domain
-    PANGOLIN_DOMAIN="${PANGOLIN_URL#*.}"
-fi
-
-# Pangolin service selection
-echo -e "\n--- PANGOLIN SERVICES ---"
-echo "Select services to expose via Pangolin (default: none):"
-echo "  1. Sonarr       5. Prowlarr"
-echo "  2. Radarr       6. Bazarr"
-echo "  3. Jellyfin     7. Transmission"
-echo "  4. Jellyseerr"
-read -p "Selection (comma-separated, e.g. 1,3,4 or 'all') [none]: " PANGOLIN_SVCS
-PANGOLIN_SVCS=${PANGOLIN_SVCS:-""}
-
-# Define Pangolin services: index:service:hostname:port:name
-declare -A PANGOLIN_SERVICE_MAP
-PANGOLIN_SERVICE_MAP[1]="sonarr:sonarr:8989"
-PANGOLIN_SERVICE_MAP[2]="radarr:radarr:7878"
-PANGOLIN_SERVICE_MAP[3]="jellyfin:jellyfin:8096"
-PANGOLIN_SERVICE_MAP[4]="jellyseerr:jellyseerr:5055"
-PANGOLIN_SERVICE_MAP[5]="prowlarr:prowlarr:9696"
-PANGOLIN_SERVICE_MAP[6]="bazarr:bazarr:6767"
-PANGOLIN_SERVICE_MAP[7]="transmission:gluetun:9099"
-
-# Generate labels for selected services
-SONARR_LABELS=""
-RADARR_LABELS=""
-JELLYFIN_LABELS=""
-JELLYSEERR_LABELS=""
-PROWLARR_LABELS=""
-BAZARR_LABELS=""
-TRANSMISSION_LABELS=""
-
-generate_pangolin_labels() {
-    local service=$1
-    local hostname=$2
-    local port=$3
-    local full_domain="${service}.${PANGOLIN_DOMAIN}"
-    
-    echo "      - pangolin.public-resources.${service}.name=${service^}"
-    echo "      - pangolin.public-resources.${service}.full-domain=${full_domain}"
-    echo "      - pangolin.public-resources.${service}.protocol=http"
-    echo "      - pangolin.public-resources.${service}.targets[0].method=http"
-    echo "      - pangolin.public-resources.${service}.targets[0].hostname=${hostname}"
-    echo "      - pangolin.public-resources.${service}.targets[0].port=${port}"
+install_docker() {
+    log_info "Configuring the official Docker repository for ${ID} ${VERSION_CODENAME}..."
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    cat > /etc/apt/sources.list.d/docker.sources <<DOCKER_REPO
+Types: deb
+URIs: https://download.docker.com/linux/${ID}
+Suites: ${VERSION_CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+DOCKER_REPO
+    apt-get update
+    apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    systemctl enable --now docker
 }
 
-# Parse selection and generate labels
-IFS=',' read -ra SELECTED <<< "$PANGOLIN_SVCS"
-for idx in "${SELECTED[@]}"; do
-    idx=$(echo $idx | xargs)  # trim whitespace
-    if [[ -n "${PANGOLIN_SERVICE_MAP[$idx]}" ]]; then
-        IFS=':' read -r svc host port <<< "${PANGOLIN_SERVICE_MAP[$idx]}"
-        case $svc in
-            sonarr)     SONARR_LABELS=$(generate_pangolin_labels "sonarr" "$host" "$port") ;;
-            radarr)     RADARR_LABELS=$(generate_pangolin_labels "radarr" "$host" "$port") ;;
-            jellyfin)   JELLYFIN_LABELS=$(generate_pangolin_labels "jellyfin" "$host" "$port") ;;
-            jellyseerr) JELLYSEERR_LABELS=$(generate_pangolin_labels "jellyseerr" "$host" "$port") ;;
-            prowlarr)   PROWLARR_LABELS=$(generate_pangolin_labels "prowlarr" "$host" "$port") ;;
-            bazarr)     BAZARR_LABELS=$(generate_pangolin_labels "bazarr" "$host" "$port") ;;
-            transmission) TRANSMISSION_LABELS=$(generate_pangolin_labels "transmission" "$host" "$port") ;;
-        esac
-    fi
-done
-
-# Determine if any Pangolin services are selected
-if [[ -n "$SONARR_LABELS" || -n "$RADARR_LABELS" || -n "$JELLYFIN_LABELS" || -n "$JELLYSEERR_LABELS" || -n "$PROWLARR_LABELS" || -n "$BAZARR_LABELS" || -n "$TRANSMISSION_LABELS" ]]; then
-    NEWT_DOCKER_SOCKET="      - /var/run/docker.sock:/var/run/docker.sock"
-    NEWT_DOCKER_ENV="      - DOCKER_SOCKET=/var/run/docker.sock"
-    log_info "Pangolin auto-discovery enabled for selected services."
+if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+    install_docker
 fi
+docker info >/dev/null 2>&1 || log_error "Docker daemon is not available."
+
+if ! command -v tailscale >/dev/null; then
+    log_info "Installing Tailscale on the host..."
+    TAILSCALE_INSTALLER=$(mktemp)
+    curl -fsSL https://tailscale.com/install.sh -o "$TAILSCALE_INSTALLER"
+    sh "$TAILSCALE_INSTALLER"
+    rm -f "$TAILSCALE_INSTALLER"
+fi
+
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+if [[ -z "$TAILSCALE_IP" ]]; then
+    log_info "Tailscale authentication is required. Open the URL shown below."
+    tailscale up
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+fi
+[[ -n "$TAILSCALE_IP" ]] || log_error "Tailscale is not connected."
+
+LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
+LAN_IP=${LAN_IP:-$(hostname -I | awk '{print $1}')}
+[[ -n "$LAN_IP" ]] || log_error "Unable to determine the LAN address."
+
+if [[ ! -f "$INSTALL_DIR/docker-compose.yml" ]]; then
+    log_info "Checking local service ports..."
+    REQUIRED_PORTS=(8096 5055 9091 7878 8989 9696 6767)
+    for port in "${REQUIRED_PORTS[@]}"; do
+        if ss -H -tuln | awk '{print $5}' | grep -Eq "(^|:)$port$"; then
+            log_error "Port $port is already in use."
+        fi
+    done
+fi
+
+echo -e "\n--- PROTONVPN ---"
+read -r -p "OpenVPN username: " VPN_USER
+read -r -s -p "OpenVPN password: " VPN_PASS
+echo
+
+echo -e "\n--- PANGOLIN / NEWT ---"
+read -r -p "Pangolin endpoint (for example https://pangolin.example.com): " PANGOLIN_ENDPOINT
+read -r -p "Newt ID: " NEWT_ID
+read -r -s -p "Newt secret: " NEWT_SECRET
+echo
+[[ -n "$PANGOLIN_ENDPOINT" && -n "$NEWT_ID" && -n "$NEWT_SECRET" ]] || log_error "Pangolin endpoint and Newt credentials are required."
+[[ "$PANGOLIN_ENDPOINT" =~ ^https?:// ]] || PANGOLIN_ENDPOINT="https://${PANGOLIN_ENDPOINT}"
+PANGOLIN_ENDPOINT=${PANGOLIN_ENDPOINT%/}
+PANGOLIN_HOST=${PANGOLIN_ENDPOINT#*://}
+PANGOLIN_HOST=${PANGOLIN_HOST%%/*}
+DETECTED_DOMAIN=${PANGOLIN_HOST#pangolin.}
+[[ "$DETECTED_DOMAIN" != "$PANGOLIN_HOST" ]] || DETECTED_DOMAIN=${PANGOLIN_HOST#*.}
+read -r -p "Public base domain [${DETECTED_DOMAIN}]: " PUBLIC_DOMAIN
+PUBLIC_DOMAIN=${PUBLIC_DOMAIN:-$DETECTED_DOMAIN}
 
 echo -e "\n--- TRANSMISSION ---"
-# Generate secure default password instead of 'admin'
-DEFAULT_TR_PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
-read -p "Transmission Username [admin]: " TR_USER
+DEFAULT_TR_PASS=$(openssl rand -hex 12)
+read -r -p "Username [admin]: " TR_USER
 TR_USER=${TR_USER:-admin}
-read -p "Transmission Password [${DEFAULT_TR_PASS}]: " TR_PASS
+read -r -p "Password [${DEFAULT_TR_PASS}]: " TR_PASS
 TR_PASS=${TR_PASS:-$DEFAULT_TR_PASS}
-echo ""
 
-# QuickSync detection
+for value in "$VPN_USER" "$VPN_PASS" "$PANGOLIN_ENDPOINT" "$NEWT_ID" "$NEWT_SECRET" "$TR_USER" "$TR_PASS" "$PUBLIC_DOMAIN"; do
+    [[ "$value" != *"'"* && "$value" != *$'\n'* ]] || log_error "Credentials and configuration values cannot contain apostrophes or newlines."
+done
+
 GPU_CONFIG=""
-if [ -d "/dev/dri" ]; then
-    log_info "GPU drivers detected (/dev/dri)."
-    read -p "Enable GPU support (Intel QuickSync) in Jellyfin? (y/n): " ENABLE_GPU
-    if [[ "$ENABLE_GPU" == "y" || "$ENABLE_GPU" == "Y" ]]; then
-        RENDER_GID=$(stat -c '%g' /dev/dri/renderD128 2>/dev/null || echo "107")
-        GPU_CONFIG="    devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"$RENDER_GID\""
+if [[ -e /dev/dri/renderD128 ]]; then
+    read -r -p "Enable Intel QuickSync for Jellyfin? (Y/n): " ENABLE_GPU
+    if [[ ! "$ENABLE_GPU" =~ ^[Nn]$ ]]; then
+        RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+        GPU_CONFIG="    devices:\n      - /dev/dri:/dev/dri\n    group_add:\n      - \"${RENDER_GID}\""
     fi
 fi
 
-# --- 5. Directory Structure ---
-log_info "Preparing directory structure in $INSTALL_DIR..."
+log_info "Preparing directories in $INSTALL_DIR..."
 DIRS=(
-    "config/gluetun" "config/transmission" "config/sonarr" "config/radarr"
-    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr"
-    "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete"
-    "data/media/movies" "data/media/tv"
+    config/gluetun config/transmission config/sonarr config/radarr config/prowlarr
+    config/bazarr config/jellyfin config/seerr config/flaresolverr
+    data/torrents/movies data/torrents/tv data/torrents/incomplete
+    data/media/movies data/media/tv backups .update-state
 )
+for dir in "${DIRS[@]}"; do mkdir -p "$INSTALL_DIR/$dir"; done
 
-# Efficient folder creation
-for dir in "${DIRS[@]}"; do
-    mkdir -p "$INSTALL_DIR/$dir"
-done
+if [[ -d "$INSTALL_DIR/config/jellyseerr" && ! -e "$INSTALL_DIR/config/seerr/settings.json" ]]; then
+    log_info "Migrating the Jellyseerr configuration directory to Seerr..."
+    cp -a "$INSTALL_DIR/config/jellyseerr/." "$INSTALL_DIR/config/seerr/"
+fi
 
-# --- 6. Fix Transmission Pathing (Pre-generate settings.json) ---
-# We ONLY enforce the correct paths here to fix hardlinks.
-# Authentication is left to the linuxserver container variables (USER/PASS).
-log_info "Pre-configuring Transmission settings to use /data volume..."
-cat <<EOF > "$INSTALL_DIR/config/transmission/settings.json"
+if [[ ! -f "$INSTALL_DIR/config/transmission/settings.json" ]]; then
+    cat > "$INSTALL_DIR/config/transmission/settings.json" <<'TRANSMISSION_SETTINGS'
 {
     "download-dir": "/data/torrents",
     "incomplete-dir": "/data/torrents/incomplete",
     "incomplete-dir-enabled": true
 }
-EOF
+TRANSMISSION_SETTINGS
+fi
 
-# --- 7. Configuration Files ---
-[ -f "$INSTALL_DIR/.env" ] && mv "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.bak"
+if [[ -f "$INSTALL_DIR/.env" ]]; then
+    cp -a "$INSTALL_DIR/.env" "$INSTALL_DIR/.env.$(date +%Y%m%d-%H%M%S).bak"
+fi
+{
+    printf "PUID='%s'\n" "$PUID"
+    printf "PGID='%s'\n" "$PGID"
+    printf "INSTALL_DIR='%s'\n" "$INSTALL_DIR"
+    printf "LAN_IP='%s'\n" "$LAN_IP"
+    printf "TAILSCALE_IP='%s'\n" "$TAILSCALE_IP"
+    printf "VPN_USER='%s+pmp'\n" "$VPN_USER"
+    printf "VPN_PASS='%s'\n" "$VPN_PASS"
+    printf "PANGOLIN_ENDPOINT='%s'\n" "$PANGOLIN_ENDPOINT"
+    printf "NEWT_ID='%s'\n" "$NEWT_ID"
+    printf "NEWT_SECRET='%s'\n" "$NEWT_SECRET"
+    printf "PUBLIC_DOMAIN='%s'\n" "$PUBLIC_DOMAIN"
+    printf "TZ='%s'\n" "$TZ"
+    printf "TR_USER='%s'\n" "$TR_USER"
+    printf "TR_PASS='%s'\n" "$TR_PASS"
+    printf "UPDATE_DELAY_DAYS='7'\n"
+} > "$INSTALL_DIR/.env"
+chmod 600 "$INSTALL_DIR/.env"
 
-# Wrap all values in quotes to prevent issues with spaces/special characters
-cat <<EOF > "$INSTALL_DIR/.env"
-PUID="$PUID"
-PGID="$PGID"
-INSTALL_DIR="$INSTALL_DIR"
-VPN_USER="$VPN_USER+pmp"
-VPN_PASS="$VPN_PASS"
-PANGOLIN_URL="$PANGOLIN_URL"
-NEWT_ID="$NEWT_ID"
-NEWT_SECRET="$NEWT_SECRET"
-TZ="$TZ"
-TR_USER="$TR_USER"
-TR_PASS="$TR_PASS"
-EOF
-
-# Generate docker-compose.yml
-log_info "Generating docker-compose.yml..."
-cat <<EOF > "$INSTALL_DIR/docker-compose.yml"
+log_info "Generating Docker Compose configuration..."
+cat > "$INSTALL_DIR/docker-compose.yml" <<EOF
 networks:
   media-network:
     driver: bridge
+  socket-proxy-network:
+    driver: bridge
+    internal: true
 
 services:
   gluetun:
-    image: qmcgaw/gluetun:latest
+    image: qmcgaw/gluetun:v3
     container_name: gluetun
     cap_add:
       - NET_ADMIN
@@ -250,13 +220,11 @@ services:
       - VPN_TYPE=openvpn
       - PORT_FORWARD_ONLY=on
       - VPN_PORT_FORWARDING=on
-      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
     volumes:
       - \${INSTALL_DIR}/config/gluetun:/gluetun
     ports:
-      - 9091:9091/tcp      # Transmission Web UI
-      - 51413:51413/tcp    # Transmission Torrent Port
-      - 51413:51413/udp
+      - "127.0.0.1:9091:9091/tcp"
+      - "\${LAN_IP}:9091:9091/tcp"
     networks:
       - media-network
     restart: unless-stopped
@@ -264,18 +232,19 @@ services:
   transmission:
     image: lscr.io/linuxserver/transmission:latest
     container_name: transmission
-    network_mode: "service:gluetun"
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
-      - USER=${TR_USER}
-      - PASS=${TR_PASS}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
+      - USER=\${TR_USER}
+      - PASS=\${TR_PASS}
     volumes:
-      - ${INSTALL_DIR}/config/transmission:/config
-      - ${INSTALL_DIR}/data:/data
-    labels:
-${TRANSMISSION_LABELS:-      - pangolin.public-resources.transmission.enabled=false}
+      - \${INSTALL_DIR}/config/transmission:/config
+      - \${INSTALL_DIR}/data:/data
     restart: unless-stopped
 
   flaresolverr:
@@ -293,220 +262,267 @@ ${TRANSMISSION_LABELS:-      - pangolin.public-resources.transmission.enabled=fa
     depends_on:
       - flaresolverr
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
     volumes:
-      - ${INSTALL_DIR}/config/prowlarr:/config
+      - \${INSTALL_DIR}/config/prowlarr:/config
     networks:
       - media-network
     ports:
-      - 9696:9696
-    labels:
-${PROWLARR_LABELS:-      - pangolin.public-resources.prowlarr.enabled=false}
+      - "127.0.0.1:9696:9696"
+      - "\${LAN_IP}:9696:9696"
     restart: unless-stopped
 
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
     container_name: sonarr
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
     volumes:
-      - ${INSTALL_DIR}/config/sonarr:/config
-      - ${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/config/sonarr:/config
+      - \${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
-      - 8989:8989
-    labels:
-${SONARR_LABELS:-      - pangolin.public-resources.sonarr.enabled=false}
+      - "127.0.0.1:8989:8989"
+      - "\${LAN_IP}:8989:8989"
     restart: unless-stopped
 
   radarr:
     image: lscr.io/linuxserver/radarr:latest
     container_name: radarr
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
     volumes:
-      - ${INSTALL_DIR}/config/radarr:/config
-      - ${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/config/radarr:/config
+      - \${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
-      - 7878:7878
-    labels:
-${RADARR_LABELS:-      - pangolin.public-resources.radarr.enabled=false}
+      - "127.0.0.1:7878:7878"
+      - "\${LAN_IP}:7878:7878"
     restart: unless-stopped
 
   bazarr:
     image: lscr.io/linuxserver/bazarr:latest
     container_name: bazarr
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
     volumes:
-      - ${INSTALL_DIR}/config/bazarr:/config
-      - ${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/config/bazarr:/config
+      - \${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
-      - 6767:6767
-    labels:
-${BAZARR_LABELS:-      - pangolin.public-resources.bazarr.enabled=false}
+      - "127.0.0.1:6767:6767"
+      - "\${LAN_IP}:6767:6767"
     restart: unless-stopped
 
   jellyfin:
     image: lscr.io/linuxserver/jellyfin:latest
     container_name: jellyfin
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - PUID=\${PUID}
+      - PGID=\${PGID}
+      - TZ=\${TZ}
     volumes:
-      - ${INSTALL_DIR}/config/jellyfin:/config
-      - ${INSTALL_DIR}/data:/data
+      - \${INSTALL_DIR}/config/jellyfin:/config
+      - \${INSTALL_DIR}/data:/data
     networks:
       - media-network
     ports:
-      - 8096:8096
+      - "127.0.0.1:8096:8096"
+      - "\${LAN_IP}:8096:8096"
     labels:
-${JELLYFIN_LABELS:-      - pangolin.public-resources.jellyfin.enabled=false}
+      pangolin.public-resources.jellyfin.name: Jellyfin
+      pangolin.public-resources.jellyfin.full-domain: jellyfin.\${PUBLIC_DOMAIN}
+      pangolin.public-resources.jellyfin.protocol: http
+      pangolin.public-resources.jellyfin.targets[0].method: http
+      pangolin.public-resources.jellyfin.targets[0].hostname: jellyfin
+      pangolin.public-resources.jellyfin.targets[0].port: "8096"
 $(echo -e "$GPU_CONFIG")
     restart: unless-stopped
 
-  jellyseerr:
-    image: fallenbagel/jellyseerr:latest
-    container_name: jellyseerr
+  seerr:
+    image: ghcr.io/seerr-team/seerr:v3
+    container_name: seerr
+    init: true
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
-      - TZ=${TZ}
+      - TZ=\${TZ}
+      - PORT=5055
     volumes:
-      - ${INSTALL_DIR}/config/jellyseerr:/app/config
+      - \${INSTALL_DIR}/config/seerr:/app/config
     networks:
       - media-network
     ports:
-      - 5055:5055
+      - "127.0.0.1:5055:5055"
+      - "\${LAN_IP}:5055:5055"
     labels:
-${JELLYSEERR_LABELS:-      - pangolin.public-resources.jellyseerr.enabled=false}
+      pangolin.public-resources.seerr.name: Seerr
+      pangolin.public-resources.seerr.full-domain: seerr.\${PUBLIC_DOMAIN}
+      pangolin.public-resources.seerr.protocol: http
+      pangolin.public-resources.seerr.auth.sso-enabled: "true"
+      pangolin.public-resources.seerr.targets[0].method: http
+      pangolin.public-resources.seerr.targets[0].hostname: seerr
+      pangolin.public-resources.seerr.targets[0].port: "5055"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  socket-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest
+    container_name: media-socket-proxy
+    environment:
+      - CONTAINERS=1
+      - EVENTS=1
+      - INFO=1
+      - NETWORKS=1
+      - PING=1
+      - VERSION=1
+      - POST=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy-network
+    read_only: true
+    tmpfs:
+      - /run
     restart: unless-stopped
 
   newt:
     image: fosrl/newt:latest
     container_name: newt
-    volumes:
-${NEWT_DOCKER_SOCKET:-#      - /var/run/docker.sock:/var/run/docker.sock}
+    depends_on:
+      - socket-proxy
     environment:
-      - PANGOLIN_ENDPOINT=${PANGOLIN_URL}
-      - NEWT_ID=${NEWT_ID}
-      - NEWT_SECRET=${NEWT_SECRET}
-${NEWT_DOCKER_ENV:-#      - DOCKER_SOCKET=/var/run/docker.sock}
+      - PANGOLIN_ENDPOINT=\${PANGOLIN_ENDPOINT}
+      - NEWT_ID=\${NEWT_ID}
+      - NEWT_SECRET=\${NEWT_SECRET}
+      - DOCKER_SOCKET=tcp://socket-proxy:2375
+      - DOCKER_ENFORCE_NETWORK_VALIDATION=true
     networks:
       - media-network
+      - socket-proxy-network
     restart: unless-stopped
-
 EOF
 
-# --- 8. Create important_info.md and port.sh ---
-log_info "Creating helper files..."
-cat <<EOF > "$INSTALL_DIR/important_info.md"
-# Media Stack - Important Information
+curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/update_stack.sh -o "$INSTALL_DIR/update_stack.sh"
+chmod 750 "$INSTALL_DIR/update_stack.sh"
 
-## 🌐 Services and Addresses
-You can access your services locally via your server's IP address:
-*   **Jellyfin:** \`http://${SERVER_IP}:8096\`
-*   **Jellyseerr:** \`http://${SERVER_IP}:5055\`
-*   **Transmission:** \`http://${SERVER_IP}:9091\`
-*   **Radarr:** \`http://${SERVER_IP}:7878\`
-*   **Sonarr:** \`http://${SERVER_IP}:8989\`
-*   **Prowlarr:** \`http://${SERVER_IP}:9696\`
-*   **Bazarr:** \`http://${SERVER_IP}:6767\`
-
-## 🔑 Transmission Credentials
-*   **Username:** \`${TR_USER}\`
-*   **Password:** \`${TR_PASS}\`
-
-## 🔗 Inter-Container Communication (IMPORTANT!)
-When configuring services to talk to each other (e.g., adding Transmission or Prowlarr to Radarr), **DO NOT use the server's IP address**.
-Instead, use the container names. This is significantly faster and prevents timeouts.
-
-*   **Transmission Host:** \`gluetun\` (Port: \`9091\`)
-    *(Note: Transmission routes its network through Gluetun, so Gluetun acts as the host on the Docker network)*
-*   **Prowlarr Host:** \`prowlarr\` (Port: \`9696\`)
-*   **FlareSolverr Host:** \`flaresolverr\` (Port: \`8191\`) - Add this as an Indexer Proxy in Prowlarr as \`http://flaresolverr:8191\`
-
-## ⚙️ Radarr & Sonarr Configuration (Crucial!)
-When you add Transmission as your Download Client in Radarr or Sonarr, you MUST set the correct **Category** to prevent path errors:
-*   In **Radarr** (Settings -> Download Clients): Set Category to \`movies\`
-*   In **Sonarr** (Settings -> Download Clients): Set Category to \`tv\`
-*(This tells Transmission to put files in \`/data/torrents/movies\` or \`tv\`, which exactly matches our automated folder structure).*
-
-## 🛡️ VPN and Port Forwarding (ProtonVPN)
-Transmission is routed through the Gluetun VPN container. For optimal download speeds and active peer connections, you must configure the forwarded port in Transmission:
-1. Run the helper script: \`./port.sh\`
-2. Note the port number.
-3. Open the Transmission Web UI (\`http://${SERVER_IP}:9091\`).
-4. Go to **Settings -> Network** and enter this port number in the **"Peer listening port"** field.
-5. *(Note: This port might change occasionally depending on ProtonVPN. If downloads ever slow down, check the logs and update the port again.)*
-
-## 📁 Folder Mapping and Hardlinks
-We have pre-configured Transmission to download directly to \`/data/torrents\`.
-Because all containers use the unified \`/data\` volume mapping, **hardlinks will work automatically**.
-When Radarr/Sonarr imports a movie/show from the torrents folder, it will create a hardlink in \`/data/media\` instead of copying the file, saving disk space and time. No remote path mappings are required in Radarr or Sonarr!
-
-*Generated on: $(date)*
-EOF
-
-# Create port.sh helper
-cat <<EOF > "$INSTALL_DIR/port.sh"
-#!/bin/bash
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-echo -e "\${BLUE}--- Checking VPN Port (Gluetun) ---\${NC}"
-if ! docker ps --format '{{.Names}}' | grep -q "^gluetun$"; then
-    echo -e "\${RED}[ERROR] 'gluetun' container is not running.\${NC}"
+cat > "$INSTALL_DIR/port.sh" <<'PORT_HELPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+PORT=$(docker exec gluetun cat /tmp/gluetun/forwarded_port 2>/dev/null || true)
+if [[ -n "$PORT" ]]; then
+    echo "Current ProtonVPN forwarded port: $PORT"
+else
+    echo "No forwarded port is available yet. Check: docker logs gluetun"
     exit 1
 fi
-PORT=\$(docker logs gluetun 2>&1 | grep "port forwarded is" | tail -n 1 | grep -oE '[0-9]+\$')
-if [ -z "\$PORT" ]; then
-    echo -e "\${YELLOW}[INFO] No forwarded port found yet.\${NC}"
-    echo -e "Ensure VPN is connected and Gluetun has requested a port from ProtonVPN."
-    echo -e "You can check full logs with: \${BLUE}docker logs gluetun\${NC}"
-else
-    echo -e "\${GREEN}[SUCCESS] Your current port is: \$PORT\${NC}"
-    echo -e ""
-    echo -e "What to do next?"
-    echo -e "1. Open Transmission Web UI in your browser."
-    echo -e "2. Click the settings icon (wrench/screwdriver) in the bottom left corner."
-    echo -e "3. Go to the \${BLUE}Network\${NC} tab."
-    echo -e "4. In the \${BLUE}Peer listening port\${NC} field, enter: \${GREEN}\$PORT\${NC}"
-    echo -e "5. Click outside the field or close the window to save."
-fi
+PORT_HELPER
+chmod 750 "$INSTALL_DIR/port.sh"
+
+cat > "$INSTALL_DIR/important_info.md" <<EOF
+# Media Stack
+
+## Local access
+
+- Jellyfin: http://${LAN_IP}:8096
+- Seerr: http://${LAN_IP}:5055
+- Transmission: http://${LAN_IP}:9091
+- Radarr: http://${LAN_IP}:7878
+- Sonarr: http://${LAN_IP}:8989
+- Prowlarr: http://${LAN_IP}:9696
+- Bazarr: http://${LAN_IP}:6767
+
+## Public access through Pangolin
+
+- Jellyfin: https://jellyfin.${PUBLIC_DOMAIN}
+- Seerr: https://seerr.${PUBLIC_DOMAIN}
+
+Only Jellyfin and Seerr are published through Pangolin. Administrative services remain private.
+
+## Remote administration through Tailscale
+
+The installer configures Tailscale Serve on the same service ports. Use this machine's MagicDNS name or Tailscale IP from a device connected to your tailnet.
+
+## Internal service addresses
+
+- Transmission: gluetun:9091
+- Prowlarr: prowlarr:9696
+- FlareSolverr: http://flaresolverr:8191
+- Jellyfin: jellyfin:8096
+- Seerr: seerr:5055
+
+Use category \`movies\` in Radarr and \`tv\` in Sonarr. All download and media paths share the \`/data\` mount, so hardlinks work without remote path mappings.
+
+## Automatic updates
+
+The stack checks for updates every night. A candidate image must remain unchanged for seven days before installation. Immediately before updating, the stack is stopped and its configuration is backed up. Failed health checks trigger an automatic rollback.
 EOF
 
-# Set permissions for the stack
-chown -R $PUID:$PGID "$INSTALL_DIR"
-find "$INSTALL_DIR" -type d -exec chmod 775 {} +
-find "$INSTALL_DIR" -type f -exec chmod 664 {} +
+chown -R "$PUID:$PGID" "$INSTALL_DIR/config" "$INSTALL_DIR/data"
+chown -R 1000:1000 "$INSTALL_DIR/config/seerr"
+find "$INSTALL_DIR/config" -type d -exec chmod 750 {} +
+find "$INSTALL_DIR/config" -type f -exec chmod 640 {} +
+find "$INSTALL_DIR/data" -type d -exec chmod 775 {} +
 chmod 600 "$INSTALL_DIR/.env"
-chmod +x "$INSTALL_DIR/port.sh"
+chmod 640 "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/important_info.md"
 
-# --- 9. Startup ---
-log_info "Starting Docker containers..."
-cd "$INSTALL_DIR" && docker compose up -d
+log_info "Validating Docker Compose configuration..."
+cd "$INSTALL_DIR"
+docker compose config --quiet
+docker compose up -d
 
-log_success "Installation successful in $INSTALL_DIR!"
-echo ""
-echo -e "${BLUE}=================================================================${NC}"
+log_info "Configuring private Tailscale access..."
+for port in 8096 5055 9091 7878 8989 9696 6767; do
+    if ! tailscale serve --bg --https="$port" "http://127.0.0.1:$port"; then
+        log_warn "Tailscale Serve could not configure HTTPS port $port. You can retry after installation."
+    fi
+done
+
+cat > /etc/systemd/system/media-stack-update.service <<EOF
+[Unit]
+Description=Delayed automatic updates for Media Stack
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory="${INSTALL_DIR}"
+ExecStart="${INSTALL_DIR}/update_stack.sh"
+EOF
+
+cat > /etc/systemd/system/media-stack-update.timer <<'EOF'
+[Unit]
+Description=Nightly Media Stack update check
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now media-stack-update.timer
+
+log_success "Media Stack installed in $INSTALL_DIR."
+echo
 cat "$INSTALL_DIR/important_info.md"
-echo -e "${BLUE}=================================================================${NC}"
-echo -e "${GREEN}A copy of this summary has been saved to $INSTALL_DIR/important_info.md${NC}"
-echo -e "${GREEN}You can also manually edit $INSTALL_DIR/docker-compose.yml anytime.${NC}"
