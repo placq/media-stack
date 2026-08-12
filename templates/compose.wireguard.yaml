@@ -1,0 +1,11 @@
+secrets:
+  proton_wireguard_private_key:
+    file: ./secrets/proton_wireguard_private_key
+
+services:
+  gluetun:
+    environment:
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY_SECRETFILE: /run/secrets/proton_wireguard_private_key
+    secrets:
+      - proton_wireguard_private_key

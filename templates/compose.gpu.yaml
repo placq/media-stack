@@ -1,0 +1,6 @@
+services:
+  jellyfin:
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - ${RENDER_GID:?RENDER_GID is required when GPU support is enabled}
