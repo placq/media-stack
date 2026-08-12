@@ -25,7 +25,7 @@ TZ=$(cat /etc/timezone 2>/dev/null || echo "Europe/London")
 
 # --- 1. Pre-Flight Port Check ---
 log_info "Running pre-flight checks..."
-REQUIRED_PORTS=(8096 5055 9091 7878 8989 9696 6767 3000)
+REQUIRED_PORTS=(8096 5055 9091 7878 8989 9696 6767)
 for port in "${REQUIRED_PORTS[@]}"; do
     if ss -tuln | grep -q ":$port "; then
         log_error "Port $port is already in use! Please stop the conflicting service and try again."
@@ -101,8 +101,8 @@ echo -e "\n--- PANGOLIN SERVICES ---"
 echo "Select services to expose via Pangolin (default: none):"
 echo "  1. Sonarr       5. Prowlarr"
 echo "  2. Radarr       6. Bazarr"
-echo "  3. Jellyfin     7. WUD"
-echo "  4. Jellyseerr   8. Transmission"
+echo "  3. Jellyfin     7. Transmission"
+echo "  4. Jellyseerr"
 read -p "Selection (comma-separated, e.g. 1,3,4 or 'all') [none]: " PANGOLIN_SVCS
 PANGOLIN_SVCS=${PANGOLIN_SVCS:-""}
 
@@ -114,8 +114,7 @@ PANGOLIN_SERVICE_MAP[3]="jellyfin:jellyfin:8096"
 PANGOLIN_SERVICE_MAP[4]="jellyseerr:jellyseerr:5055"
 PANGOLIN_SERVICE_MAP[5]="prowlarr:prowlarr:9696"
 PANGOLIN_SERVICE_MAP[6]="bazarr:bazarr:6767"
-PANGOLIN_SERVICE_MAP[7]="wud:wud:3000"
-PANGOLIN_SERVICE_MAP[8]="transmission:gluetun:9099"
+PANGOLIN_SERVICE_MAP[7]="transmission:gluetun:9099"
 
 # Generate labels for selected services
 SONARR_LABELS=""
@@ -124,7 +123,6 @@ JELLYFIN_LABELS=""
 JELLYSEERR_LABELS=""
 PROWLARR_LABELS=""
 BAZARR_LABELS=""
-WUD_LABELS=""
 TRANSMISSION_LABELS=""
 
 generate_pangolin_labels() {
@@ -154,14 +152,13 @@ for idx in "${SELECTED[@]}"; do
             jellyseerr) JELLYSEERR_LABELS=$(generate_pangolin_labels "jellyseerr" "$host" "$port") ;;
             prowlarr)   PROWLARR_LABELS=$(generate_pangolin_labels "prowlarr" "$host" "$port") ;;
             bazarr)     BAZARR_LABELS=$(generate_pangolin_labels "bazarr" "$host" "$port") ;;
-            wud)        WUD_LABELS=$(generate_pangolin_labels "wud" "$host" "$port") ;;
             transmission) TRANSMISSION_LABELS=$(generate_pangolin_labels "transmission" "$host" "$port") ;;
         esac
     fi
 done
 
 # Determine if any Pangolin services are selected
-if [[ -n "$SONARR_LABELS" || -n "$RADARR_LABELS" || -n "$JELLYFIN_LABELS" || -n "$JELLYSEERR_LABELS" || -n "$PROWLARR_LABELS" || -n "$BAZARR_LABELS" || -n "$WUD_LABELS" || -n "$TRANSMISSION_LABELS" ]]; then
+if [[ -n "$SONARR_LABELS" || -n "$RADARR_LABELS" || -n "$JELLYFIN_LABELS" || -n "$JELLYSEERR_LABELS" || -n "$PROWLARR_LABELS" || -n "$BAZARR_LABELS" || -n "$TRANSMISSION_LABELS" ]]; then
     NEWT_DOCKER_SOCKET="      - /var/run/docker.sock:/var/run/docker.sock"
     NEWT_DOCKER_ENV="      - DOCKER_SOCKET=/var/run/docker.sock"
     log_info "Pangolin auto-discovery enabled for selected services."
@@ -191,7 +188,7 @@ fi
 log_info "Preparing directory structure in $INSTALL_DIR..."
 DIRS=(
     "config/gluetun" "config/transmission" "config/sonarr" "config/radarr"
-    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr" "config/wud"
+    "config/prowlarr" "config/bazarr" "config/jellyfin" "config/jellyseerr" "config/flaresolverr"
     "data/torrents/movies" "data/torrents/tv" "data/torrents/incomplete"
     "data/media/movies" "data/media/tv"
 )
@@ -413,21 +410,6 @@ ${NEWT_DOCKER_ENV:-#      - DOCKER_SOCKET=/var/run/docker.sock}
       - media-network
     restart: unless-stopped
 
-  wud:
-    image: fmartinou/whats-up-docker:latest
-    container_name: wud
-    environment:
-      - TZ=${TZ}
-      - WUD_LOG_LEVEL=INFO
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - 3000:3000
-    networks:
-      - media-network
-    labels:
-${WUD_LABELS:-      - pangolin.public-resources.wud.enabled=false}
-    restart: unless-stopped
 EOF
 
 # --- 8. Create important_info.md and port.sh ---
@@ -444,7 +426,6 @@ You can access your services locally via your server's IP address:
 *   **Sonarr:** \`http://${SERVER_IP}:8989\`
 *   **Prowlarr:** \`http://${SERVER_IP}:9696\`
 *   **Bazarr:** \`http://${SERVER_IP}:6767\`
-*   **WUD:** \`http://${SERVER_IP}:3000\`
 
 ## 🔑 Transmission Credentials
 *   **Username:** \`${TR_USER}\`
