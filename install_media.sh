@@ -594,7 +594,7 @@ else
     rm -f "$INSTALL_DIR/secrets/proton_openvpn_user" "$INSTALL_DIR/secrets/proton_openvpn_password"
 fi
 install -m 0600 "$STAGE_DIR/config/newt/config.json" "$INSTALL_DIR/config/newt/config.json"
-rm -f "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/port.sh"
+rm -f "$INSTALL_DIR/docker-compose.yml"
 
 if [[ "$ENABLE_TAILSCALE" == yes ]]; then
     if ! command -v tailscale >/dev/null; then
