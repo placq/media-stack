@@ -11,7 +11,6 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 - **Tunnel Ready:** Built-in support for **Pangolin** (via Newt) for secure remote access. During installation, you can selectively choose which services to expose (by default, no services are exposed).
 - **Cloudflare Bypass:** Includes **FlareSolverr** to assist Prowlarr in indexing protected sites.
 - **Auto-generated Docs:** Creates an `important_info.md` file with all your local IP addresses, ports, and internal container communication guidelines.
-- **Automatic Updates:** Includes **What's Up Docker (WUD)** to keep your stack up to date.
 
 ## 📦 Services Included
 
@@ -27,7 +26,6 @@ An automated bash script to set up a full, self-hosted media stack with Docker, 
 | 🛡️   | **Gluetun**      | VPN client (OpenVPN/Wireguard)                  |
 | 🧩   | **FlareSolverr** | Proxy server to bypass Cloudflare protection    |
 | 🌐   | **Newt**         | Pangolin Tunnel agent for remote access         |
-| 🔄   | **WUD**          | Updates notifier/updater for Docker containers  |
 
 ## 🛠️ Installation
 
