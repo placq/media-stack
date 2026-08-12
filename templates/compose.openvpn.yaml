@@ -1,0 +1,15 @@
+secrets:
+  proton_openvpn_user:
+    file: ./secrets/proton_openvpn_user
+  proton_openvpn_password:
+    file: ./secrets/proton_openvpn_password
+
+services:
+  gluetun:
+    environment:
+      VPN_TYPE: openvpn
+      OPENVPN_USER_SECRETFILE: /run/secrets/proton_openvpn_user
+      OPENVPN_PASSWORD_SECRETFILE: /run/secrets/proton_openvpn_password
+    secrets:
+      - proton_openvpn_user
+      - proton_openvpn_password

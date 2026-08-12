@@ -1,0 +1,342 @@
+name: media-stack
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-linuxserver: &linuxserver
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging: *default-logging
+
+networks:
+  media:
+    driver: bridge
+  socket-proxy:
+    driver: bridge
+    internal: true
+
+secrets:
+  transmission_user:
+    file: ./secrets/transmission_user
+  transmission_password:
+    file: ./secrets/transmission_password
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: protonvpn
+      PORT_FORWARD_ONLY: "on"
+      VPN_PORT_FORWARDING: "on"
+      VPN_PORT_FORWARDING_PROVIDER: protonvpn
+      VPN_PORT_FORWARDING_STATUS_FILE: /tmp/gluetun/forwarded_port
+      FIREWALL_INPUT_PORTS: "9091"
+      UPDATER_PERIOD: 480h
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - ./config/gluetun:/gluetun
+    ports:
+      - target: 9091
+        published: "9091"
+        host_ip: 127.0.0.1
+        protocol: tcp
+      - target: 9091
+        published: "9091"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+        protocol: tcp
+    networks:
+      - media
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  transmission:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/transmission:latest
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+      FILE__USER: /run/secrets/transmission_user
+      FILE__PASS: /run/secrets/transmission_password
+      WHITELIST: ""
+      HOST_WHITELIST: ""
+    secrets:
+      - transmission_user
+      - transmission_password
+    volumes:
+      - ./config/transmission:/config
+      - ./data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS --max-time 5
+          -u "$$(cat /run/secrets/transmission_user):$$(cat /run/secrets/transmission_password)"
+          http://127.0.0.1:9091/transmission/web/ >/dev/null
+      start_period: 30s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    profiles:
+      - flaresolverr
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:?TZ is required}
+      LOG_LEVEL: info
+    networks:
+      - media
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  prowlarr:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/prowlarr:latest
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+    volumes:
+      - ./config/prowlarr:/config
+    networks:
+      - media
+    ports:
+      - target: 9696
+        published: "9696"
+        host_ip: 127.0.0.1
+      - target: 9696
+        published: "9696"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 5 http://127.0.0.1:9696/ping >/dev/null || exit 1"]
+      start_period: 30s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  sonarr:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/sonarr:latest
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+    volumes:
+      - ./config/sonarr:/config
+      - ./data:/data
+    networks:
+      - media
+    ports:
+      - target: 8989
+        published: "8989"
+        host_ip: 127.0.0.1
+      - target: 8989
+        published: "8989"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 5 http://127.0.0.1:8989/ping >/dev/null || exit 1"]
+      start_period: 30s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  radarr:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/radarr:latest
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+    volumes:
+      - ./config/radarr:/config
+      - ./data:/data
+    networks:
+      - media
+    ports:
+      - target: 7878
+        published: "7878"
+        host_ip: 127.0.0.1
+      - target: 7878
+        published: "7878"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 5 http://127.0.0.1:7878/ping >/dev/null || exit 1"]
+      start_period: 30s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  bazarr:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/bazarr:latest
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+    volumes:
+      - ./config/bazarr:/config
+      - ./data:/data
+    networks:
+      - media
+    ports:
+      - target: 6767
+        published: "6767"
+        host_ip: 127.0.0.1
+      - target: 6767
+        published: "6767"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 5 http://127.0.0.1:6767/ >/dev/null || exit 1"]
+      start_period: 45s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  jellyfin:
+    <<: *linuxserver
+    image: lscr.io/linuxserver/jellyfin:latest
+    environment:
+      PUID: ${PUID:?PUID is required}
+      PGID: ${PGID:?PGID is required}
+      TZ: ${TZ:?TZ is required}
+      UMASK: "002"
+    volumes:
+      - ./config/jellyfin:/config
+      - ./data:/data
+    networks:
+      - media
+    ports:
+      - target: 8096
+        published: "8096"
+        host_ip: 127.0.0.1
+      - target: 8096
+        published: "8096"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    labels:
+      pangolin.public-resources.jellyfin.name: Jellyfin
+      pangolin.public-resources.jellyfin.full-domain: jellyfin.${PUBLIC_DOMAIN:?PUBLIC_DOMAIN is required}
+      pangolin.public-resources.jellyfin.mode: http
+      pangolin.public-resources.jellyfin.targets[0].method: http
+      pangolin.public-resources.jellyfin.targets[0].hostname: jellyfin
+      pangolin.public-resources.jellyfin.targets[0].port: "8096"
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS --max-time 5 http://127.0.0.1:8096/System/Info/Public >/dev/null || exit 1"]
+      start_period: 45s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:v3
+    init: true
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:?TZ is required}
+      PORT: "5055"
+    volumes:
+      - ./config/seerr:/app/config
+    networks:
+      - media
+    ports:
+      - target: 5055
+        published: "5055"
+        host_ip: 127.0.0.1
+      - target: 5055
+        published: "5055"
+        host_ip: ${LAN_IP:?LAN_IP is required}
+    labels:
+      pangolin.public-resources.seerr.name: Seerr
+      pangolin.public-resources.seerr.full-domain: seerr.${PUBLIC_DOMAIN:?PUBLIC_DOMAIN is required}
+      pangolin.public-resources.seerr.mode: http
+      pangolin.public-resources.seerr.auth.sso-enabled: "true"
+      pangolin.public-resources.seerr.targets[0].method: http
+      pangolin.public-resources.seerr.targets[0].hostname: seerr
+      pangolin.public-resources.seerr.targets[0].port: "5055"
+    healthcheck:
+      test: [CMD-SHELL, "wget -q --spider http://127.0.0.1:5055/api/v1/settings/public || exit 1"]
+      start_period: 30s
+      interval: 20s
+      timeout: 6s
+      retries: 5
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  socket-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest
+    profiles:
+      - pangolin
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      EVENTS: "1"
+      INFO: "1"
+      NETWORKS: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "0"
+      ALLOW_RESTARTS: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy
+    read_only: true
+    tmpfs:
+      - /run:size=16m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  newt:
+    image: fosrl/newt:latest
+    profiles:
+      - pangolin
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      CONFIG_FILE: /config/config.json
+      DOCKER_SOCKET: tcp://socket-proxy:2375
+      DOCKER_ENFORCE_NETWORK_VALIDATION: "true"
+      HEALTH_FILE: /tmp/healthy
+    volumes:
+      - ./config/newt:/config
+    networks:
+      - media
+      - socket-proxy
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: [CMD-SHELL, "test -f /tmp/healthy"]
+      start_period: 30s
+      interval: 20s
+      timeout: 3s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
