@@ -1,73 +1,109 @@
-# Perfect Media Stack Installer
+# Media Stack Installer
 
-An automated bash script to set up a full, self-hosted media stack with Docker, VPN integration, and Pangolin tunnel support.
+An interactive installer for a self-hosted media stack on Ubuntu or Debian. It configures Docker, ProtonVPN, Pangolin, Tailscale and delayed automatic updates.
 
-## 🚀 Features
+## Access model
 
-- **Automated Setup:** Installs Docker and Docker Compose (official repositories) on Ubuntu/Debian.
-- **VPN Protection:** All download traffic (Transmission) is routed through a **Gluetun** container using ProtonVPN.
-- **Hardware Acceleration:** Automatic detection and configuration of Intel QuickSync for Jellyfin.
-- **Hardlink Support:** Pre-configures a unified `/data` folder structure optimized for atomic moves and hardlinks.
-- **Tunnel Ready:** Built-in support for **Pangolin** (via Newt) for secure remote access. During installation, you can selectively choose which services to expose (by default, no services are exposed).
-- **Cloudflare Bypass:** Includes **FlareSolverr** to assist Prowlarr in indexing protected sites.
-- **Auto-generated Docs:** Creates an `important_info.md` file with all your local IP addresses, ports, and internal container communication guidelines.
+| Service | LAN | Tailscale | Public via Pangolin |
+| --- | :---: | :---: | :---: |
+| Jellyfin | Yes | Yes | Yes |
+| Seerr | Yes | Yes | Yes |
+| Transmission | Yes | Yes | No |
+| Sonarr | Yes | Yes | No |
+| Radarr | Yes | Yes | No |
+| Prowlarr | Yes | Yes | No |
+| Bazarr | Yes | Yes | No |
+| FlareSolverr | No | No | No |
 
-## 📦 Services Included
+Only Jellyfin and Seerr are internet-facing. Administrative applications are bound to loopback and the detected LAN address, with private remote access provided by Tailscale Serve.
 
-| Icon | Service          | Description                                     |
-| :--- | :--------------- | :---------------------------------------------- |
-| 🎬   | **Jellyfin**     | Media Server (Alternative to Plex/Emby)         |
-| 🎫   | **Jellyseerr**   | Request management for movies and TV shows      |
-| 📥   | **Transmission** | BitTorrent client (protected by VPN)            |
-| 🎥   | **Radarr**       | Automatic movie downloader                      |
-| 📺   | **Sonarr**       | Automatic TV show downloader                    |
-| 🔍   | **Prowlarr**     | Indexer manager (integrates with Radarr/Sonarr) |
-| 📝   | **Bazarr**       | Automatic subtitle downloader                   |
-| 🛡️   | **Gluetun**      | VPN client (OpenVPN/Wireguard)                  |
-| 🧩   | **FlareSolverr** | Proxy server to bypass Cloudflare protection    |
-| 🌐   | **Newt**         | Pangolin Tunnel agent for remote access         |
+## Included services
 
-## 🛠️ Installation
+- Jellyfin
+- Seerr
+- Transmission routed through Gluetun and ProtonVPN
+- Sonarr, Radarr, Prowlarr and Bazarr
+- FlareSolverr
+- Newt for Pangolin
+- A restricted Docker Socket Proxy used by Newt for label discovery
 
-**One-line Installation (Recommended):**
+Newt never receives the host Docker socket directly. Its read-only discovery traffic goes through a proxy that blocks write requests.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/install_media.sh | sudo bash
+## Automatic updates
+
+There is no update dashboard and no notification service. A systemd timer checks container images nightly.
+
+- A new image must remain unchanged for seven days before installation.
+- The entire stack is stopped before creating a configuration backup.
+- The updater recreates the stack and waits for running/healthy containers.
+- A failed startup or health check restores the configuration and previous images.
+- Five configuration backups and two rollback images per service are retained.
+
+The delay can be changed in `/opt/media-stack/.env`:
+
+```dotenv
+UPDATE_DELAY_DAYS='7'
 ```
 
-**Manual Installation:**
+## Requirements
 
-1. **Clone the repository to your server:**
+- Ubuntu or Debian with systemd
+- ProtonVPN account with OpenVPN credentials and port forwarding
+- Pangolin endpoint plus Newt ID and secret
+- A Tailscale account/tailnet
+- Root or sudo access
 
-   ```bash
-   git clone https://github.com/placq/media-stack.git
-   cd media-stack
-   ```
+Seerr uses the official `ghcr.io/seerr-team/seerr:v3` image and runs as UID/GID `1000:1000` as required by the project.
 
-2. **Make the script executable and run it:**
+## Installation
 
-   ```bash
-   chmod +x install_media.sh
-   sudo ./install_media.sh
-   ```
+Download the installer first so its interactive prompts continue to read from the terminal:
 
-3. **Follow the interactive prompts** to configure your VPN, Pangolin credentials, and installation path (defaults to `/opt/media-stack`).
-4. **Read the generated summary:** Once finished, the script will output essential configuration steps from `important_info.md`.
+```bash
+installer=$(mktemp)
+curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/install_media.sh -o "$installer"
+sudo bash "$installer"
+rm -f "$installer"
+```
 
-## 📂 Directory Structure
+Alternatively, clone this repository and run:
 
-The script creates a specialized structure for **Hardlinks** to save disk space and speed up imports:
+```bash
+chmod +x install_media.sh
+sudo ./install_media.sh
+```
+
+Tailscale may print an authentication URL during installation. Open it to add the server to your tailnet. The installer then configures private HTTPS access to every web interface using Tailscale Serve.
+
+## Data layout
 
 ```text
 /opt/media-stack/
-├── config/             # App data, databases, and configuration for all containers
-└── data/               # Unified volume mapped to all containers
-    ├── media/          # Final organized library (Movies/TV)
-    └── torrents/       # Incomplete and finished downloads
+├── .env
+├── docker-compose.yml
+├── update_stack.sh
+├── backups/
+├── config/
+└── data/
+    ├── media/
+    │   ├── movies/
+    │   └── tv/
+    └── torrents/
+        ├── incomplete/
+        ├── movies/
+        └── tv/
 ```
 
-## ⚠️ Requirements
+All download and library paths share a single `/data` mount, allowing Sonarr and Radarr to use hardlinks instead of copying files.
 
-- **OS:** Ubuntu 22.04+ or Debian 11+ recommended. I use https://community-scripts.org/scripts/docker to create a suitable LXC.
-- **VPN:** ProtonVPN account (OpenVPN credentials required).
-- **Tunnel:** Pangolin Newt ID/Secret (optional).
+## Useful commands
+
+```bash
+cd /opt/media-stack
+sudo docker compose ps
+sudo systemctl status media-stack-update.timer
+sudo systemctl start media-stack-update.service
+sudo ./port.sh
+```
+
+Secrets are stored only in `.env`, which is created with mode `600`. Generated documentation does not contain passwords.
