@@ -1,0 +1,56 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts-and-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate shell syntax
+        run: bash -n install_media.sh update_stack.sh sync_transmission_port.sh
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=error install_media.sh update_stack.sh sync_transmission_port.sh
+
+      - name: Extract generated Compose configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("install_media.sh").read_text()
+          marker = 'cat > "$INSTALL_DIR/docker-compose.yml" <<EOF\n'
+          template = source.split(marker, 1)[1].split("\nEOF\n", 1)[0]
+          template = template.replace(r"\${", "${")
+          template = template.replace('$(echo -e "$GPU_CONFIG")', "")
+          Path("/tmp/docker-compose.yml").write_text(template + "\n")
+          PY
+          cat > /tmp/media-stack.env <<'EOF'
+          PUID=1000
+          PGID=1000
+          INSTALL_DIR=/tmp/media-stack
+          LAN_IP=192.0.2.10
+          VPN_USER=test+pmp
+          VPN_PASS=test
+          PANGOLIN_ENDPOINT=https://pangolin.example.com
+          NEWT_ID=test
+          NEWT_SECRET=test
+          PUBLIC_DOMAIN=example.com
+          TZ=Europe/Warsaw
+          TR_USER=admin
+          TR_PASS=test
+          EOF
+
+      - name: Validate generated Compose configuration
+        run: docker compose --env-file /tmp/media-stack.env -f /tmp/docker-compose.yml config --quiet
