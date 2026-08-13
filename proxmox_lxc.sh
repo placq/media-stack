@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 
 # This script runs on the Proxmox VE host. It creates an unprivileged LXC,
-# passes through the required devices, and launches install_media.sh inside it.
+# passes through the required devices, optionally bind-mounts an existing
+# host filesystem for media, and launches install_media.sh inside the LXC.
 
 set -Eeuo pipefail
 umask 077
 
 readonly PROVISIONER_VERSION="4.0.0"
 readonly PROJECT_REPOSITORY="placq/media-stack"
+readonly MEDIA_MOUNTPOINT="/opt/media-stack/data"
+readonly DEFAULT_HOST_MEDIA_PATH="/srv/media"
+readonly DEFAULT_UNPRIV_BASE_ID=100000
+readonly MEDIA_CONTAINER_UID=1000
+readonly MEDIA_CONTAINER_GID=1000
+readonly MEDIA_HOST_UID=$((DEFAULT_UNPRIV_BASE_ID + MEDIA_CONTAINER_UID))
+readonly MEDIA_HOST_GID=$((DEFAULT_UNPRIV_BASE_ID + MEDIA_CONTAINER_GID))
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info() { printf '%b[INFO]%b %s\n' "$BLUE" "$NC" "$*"; }
@@ -26,6 +34,17 @@ Usage:
 The script creates a new unprivileged Debian 13 LXC and then runs the media
 installer inside that LXC. It never runs Docker or media services on the
 Proxmox host itself.
+
+Media storage can be:
+  host     an already-mounted host filesystem/directory such as /srv/media
+  proxmox  a new Proxmox-managed volume
+  none     no separate media storage; data remains inside the LXC rootfs
+
+For "host", the provisioner refuses to use a path backed by the Proxmox root
+filesystem. It creates a storage sentinel, prepares the standard media
+directories for UID/GID 1000 inside the unprivileged LXC, tests write access
+and hardlinks, and installs a Docker startup guard so a missing/wrong media
+filesystem cannot silently receive downloads on the system disk.
 EOF
 }
 
@@ -91,7 +110,8 @@ first_storage_for() {
 
 storage_supports() {
     local storage=$1 content=$2
-    pvesm status --content "$content" 2>/dev/null | awk 'NR > 1 && $1 == storage && $3 == "active" {found=1} END {exit !found}' storage="$storage"
+    pvesm status --content "$content" 2>/dev/null |
+        awk 'NR > 1 && $1 == storage && $3 == "active" {found=1} END {exit !found}' storage="$storage"
 }
 
 valid_ipv4() {
@@ -104,6 +124,91 @@ valid_ipv4() {
             return 1
         fi
     done
+}
+
+validate_host_media_path() {
+    local path=$1 backing_target backing_source backing_fstype
+    [[ "$path" == /* ]] || die "Host media path must be absolute."
+    [[ "$path" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+        die "Host media path may contain only letters, digits, /, ., _ and -."
+    [[ -d "$path" ]] || die "Host media path does not exist or is not a directory: $path"
+    [[ ! -L "$path" ]] || die "Host media path must not be a symlink: $path"
+
+    backing_target=$(findmnt -T "$path" -n -o TARGET --first 2>/dev/null || true)
+    backing_source=$(findmnt -T "$path" -n -o SOURCE --first 2>/dev/null || true)
+    backing_fstype=$(findmnt -T "$path" -n -o FSTYPE --first 2>/dev/null || true)
+
+    [[ -n "$backing_target" && -n "$backing_source" ]] ||
+        die "Unable to determine the filesystem backing $path."
+    [[ "$backing_target" != "/" ]] ||
+        die "$path is currently backed by the Proxmox root filesystem. Mount the media disk first."
+    [[ -w "$path" ]] || die "Host media path is not writable by root: $path"
+
+    HOST_MEDIA_BACKING_TARGET=$backing_target
+    HOST_MEDIA_BACKING_SOURCE=$backing_source
+    HOST_MEDIA_BACKING_FSTYPE=$backing_fstype
+}
+
+prepare_host_media_path() {
+    local path=$1 test_source test_target
+    command -v setpriv >/dev/null ||
+        die "setpriv is required on the Proxmox host (normally provided by util-linux)."
+
+    info "Preparing media directories on $path without recursively changing existing files..."
+    install -d -m 0775 -o "$MEDIA_HOST_UID" -g "$MEDIA_HOST_GID" \
+        "$path/torrents" \
+        "$path/torrents/movies" \
+        "$path/torrents/tv" \
+        "$path/torrents/incomplete" \
+        "$path/media" \
+        "$path/media/movies" \
+        "$path/media/tv"
+
+    STORAGE_TOKEN=$(cat /proc/sys/kernel/random/uuid)
+    printf '%s\n' "$STORAGE_TOKEN" > "$path/.media-stack-storage"
+    chmod 0444 "$path/.media-stack-storage"
+
+    test_source="$path/torrents/.media-stack-write-test-$$"
+    test_target="$path/media/.media-stack-hardlink-test-$$"
+    rm -f -- "$test_source" "$test_target"
+
+    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups \
+        -- touch "$test_source"; then
+        die "Mapped LXC UID $MEDIA_CONTAINER_UID (host UID $MEDIA_HOST_UID) cannot write to $path/torrents."
+    fi
+    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups \
+        -- ln "$test_source" "$test_target"; then
+        rm -f -- "$test_source" "$test_target"
+        die "Hardlinks do not work between $path/torrents and $path/media. They must share one filesystem."
+    fi
+    rm -f -- "$test_source" "$test_target"
+}
+
+install_host_media_guard() {
+    local escaped_token
+    escaped_token=$(printf '%q' "$STORAGE_TOKEN")
+    info "Installing Docker startup guard for the host media filesystem..."
+    pct exec "$CTID" -- bash -c "
+        set -Eeuo pipefail
+        install -d -m 0755 /usr/local/sbin /etc/systemd/system/docker.service.d
+        cat > /usr/local/sbin/media-stack-storage-guard <<'GUARD'
+#!/bin/sh
+set -eu
+expected=$escaped_token
+actual=\$(cat '$MEDIA_MOUNTPOINT/.media-stack-storage' 2>/dev/null || true)
+if [ \"\$actual\" != \"\$expected\" ]; then
+    echo 'Media Stack storage guard: expected media filesystem is not mounted at $MEDIA_MOUNTPOINT.' >&2
+    exit 1
+fi
+GUARD
+        chmod 0755 /usr/local/sbin/media-stack-storage-guard
+        cat > /etc/systemd/system/docker.service.d/10-media-stack-storage.conf <<'DROPIN'
+[Service]
+ExecStartPre=/usr/local/sbin/media-stack-storage-guard
+DROPIN
+        systemctl daemon-reload
+        /usr/local/sbin/media-stack-storage-guard
+    "
 }
 
 PVE_VERSION=$(pveversion | head -n1)
@@ -166,19 +271,46 @@ if [[ -n "$VLAN_TAG" ]]; then
     NET0+=",tag=${VLAN_TAG}"
 fi
 
-yes_no ADD_DATA_DISK "Allocate a separate Proxmox-managed media volume" no
+DEFAULT_MEDIA_MODE=none
+if [[ -d "$DEFAULT_HOST_MEDIA_PATH" ]]; then
+    DEFAULT_MEDIA_TARGET=$(findmnt -T "$DEFAULT_HOST_MEDIA_PATH" -n -o TARGET --first 2>/dev/null || true)
+    [[ -n "$DEFAULT_MEDIA_TARGET" && "$DEFAULT_MEDIA_TARGET" != "/" ]] && DEFAULT_MEDIA_MODE=host
+fi
+
+prompt MEDIA_STORAGE_MODE "Media storage mode (host/proxmox/none)" "$DEFAULT_MEDIA_MODE"
+HOST_DATA_PATH=""
+HOST_MEDIA_BACKING_TARGET=""
+HOST_MEDIA_BACKING_SOURCE=""
+HOST_MEDIA_BACKING_FSTYPE=""
 DATA_STORAGE=""
 DATA_SIZE_GB=""
 DATA_BACKUP=no
-if [[ "$ADD_DATA_DISK" == yes ]]; then
-    prompt DATA_STORAGE "Media volume storage" "$ROOT_STORAGE"
-    storage_supports "$DATA_STORAGE" rootdir || die "Storage $DATA_STORAGE is not active or does not support LXC volumes."
-    prompt DATA_SIZE_GB "Media volume size in GiB" 500
-    if [[ ! "$DATA_SIZE_GB" =~ ^[0-9]+$ ]] || ((DATA_SIZE_GB < 20)); then
-        die "Media volume must be at least 20 GiB."
-    fi
-    yes_no DATA_BACKUP "Include the media volume in Proxmox vzdump backups" no
-fi
+STORAGE_TOKEN=""
+
+case "$MEDIA_STORAGE_MODE" in
+    host)
+        prompt HOST_DATA_PATH "Existing host media path" "$DEFAULT_HOST_MEDIA_PATH"
+        validate_host_media_path "$HOST_DATA_PATH"
+        HOST_DATA_PATH=$(readlink -f -- "$HOST_DATA_PATH")
+        validate_host_media_path "$HOST_DATA_PATH"
+        prepare_host_media_path "$HOST_DATA_PATH"
+        ;;
+    proxmox)
+        prompt DATA_STORAGE "Media volume storage" "$ROOT_STORAGE"
+        storage_supports "$DATA_STORAGE" rootdir ||
+            die "Storage $DATA_STORAGE is not active or does not support LXC volumes."
+        prompt DATA_SIZE_GB "Media volume size in GiB" 500
+        if [[ ! "$DATA_SIZE_GB" =~ ^[0-9]+$ ]] || ((DATA_SIZE_GB < 20)); then
+            die "Media volume must be at least 20 GiB."
+        fi
+        yes_no DATA_BACKUP "Include the media volume in Proxmox vzdump backups" no
+        ;;
+    none)
+        ;;
+    *)
+        die "Media storage mode must be host, proxmox or none."
+        ;;
+esac
 
 ENABLE_GPU=no
 if [[ -e /dev/dri/renderD128 ]]; then
@@ -196,18 +328,36 @@ printf '  Root filesystem: %s:%s GiB\n' "$ROOT_STORAGE" "$ROOT_DISK_GB"
 printf '  Network:         %s via %s%s\n' "$NETWORK_MODE" "$BRIDGE" "${VLAN_TAG:+, VLAN $VLAN_TAG}"
 printf '  Required device: /dev/net/tun\n'
 [[ "$ENABLE_GPU" == yes ]] && printf '  GPU device:      /dev/dri/renderD128\n'
-[[ "$ADD_DATA_DISK" == yes ]] && printf '  Media volume:    %s:%s GiB → /opt/media-stack/data (vzdump: %s)\n' \
-    "$DATA_STORAGE" "$DATA_SIZE_GB" "$DATA_BACKUP"
+case "$MEDIA_STORAGE_MODE" in
+    host)
+        printf '  Media storage:   host bind mount %s → %s\n' "$HOST_DATA_PATH" "$MEDIA_MOUNTPOINT"
+        printf '  Backing fs:      %s (%s, %s)\n' \
+            "$HOST_MEDIA_BACKING_SOURCE" "$HOST_MEDIA_BACKING_FSTYPE" "$HOST_MEDIA_BACKING_TARGET"
+        printf '  LXC data UID:    %s:%s → host %s:%s\n' \
+            "$MEDIA_CONTAINER_UID" "$MEDIA_CONTAINER_GID" "$MEDIA_HOST_UID" "$MEDIA_HOST_GID"
+        printf '  vzdump media:    no (bind mount)\n'
+        ;;
+    proxmox)
+        printf '  Media storage:   %s:%s GiB → %s (vzdump: %s)\n' \
+            "$DATA_STORAGE" "$DATA_SIZE_GB" "$MEDIA_MOUNTPOINT" "$DATA_BACKUP"
+        ;;
+    none)
+        printf '  Media storage:   LXC root filesystem (no separate media volume)\n'
+        ;;
+esac
 printf '  Proxmox host:    no Docker and no media services will be installed here\n\n'
 yes_no CONFIRM "Create this LXC and launch its internal installer" no
 [[ "$CONFIRM" == yes ]] || die "Cancelled before making changes."
 
 info "Refreshing the Proxmox appliance catalog..."
 pveam update
-TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|gz)$/ {print $2}' | sort -V | tail -n1)
+TEMPLATE_NAME=$(pveam available --section system |
+    awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|gz)$/ {print $2}' |
+    sort -V | tail -n1)
 [[ -n "$TEMPLATE_NAME" ]] || die "No Debian 13 amd64 standard template was found in the Proxmox appliance catalog."
 TEMPLATE_REF="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
-if ! pveam list "$TEMPLATE_STORAGE" | awk -v ref="$TEMPLATE_REF" '$1 == ref {found=1} END {exit !found}'; then
+if ! pveam list "$TEMPLATE_STORAGE" |
+    awk -v ref="$TEMPLATE_REF" '$1 == ref {found=1} END {exit !found}'; then
     info "Downloading $TEMPLATE_NAME to $TEMPLATE_STORAGE..."
     pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"
 else
@@ -233,15 +383,21 @@ pct create "$CTID" "$TEMPLATE_REF" \
     --description "Media Stack LXC managed by ${PROJECT_REPOSITORY}"
 CT_CREATED=true
 
-if [[ "$ADD_DATA_DISK" == yes ]]; then
-    info "Allocating the media volume..."
-    if [[ "$DATA_BACKUP" == yes ]]; then
-        DATA_BACKUP_FLAG=1
-    else
-        DATA_BACKUP_FLAG=0
-    fi
-    pct set "$CTID" --mp0 "${DATA_STORAGE}:${DATA_SIZE_GB},mp=/opt/media-stack/data,backup=${DATA_BACKUP_FLAG}"
-fi
+case "$MEDIA_STORAGE_MODE" in
+    host)
+        info "Bind-mounting $HOST_DATA_PATH into CT $CTID at $MEDIA_MOUNTPOINT..."
+        pct set "$CTID" --mp0 "${HOST_DATA_PATH},mp=${MEDIA_MOUNTPOINT},backup=0"
+        ;;
+    proxmox)
+        info "Allocating the media volume..."
+        if [[ "$DATA_BACKUP" == yes ]]; then
+            DATA_BACKUP_FLAG=1
+        else
+            DATA_BACKUP_FLAG=0
+        fi
+        pct set "$CTID" --mp0 "${DATA_STORAGE}:${DATA_SIZE_GB},mp=${MEDIA_MOUNTPOINT},backup=${DATA_BACKUP_FLAG}"
+        ;;
+esac
 
 if [[ "$ENABLE_GPU" == yes ]]; then
     info "Passing through the render device..."
@@ -266,6 +422,19 @@ for ((_attempt = 1; _attempt <= 60; _attempt++)); do
     sleep 2
 done
 $READY || die "CT $CTID did not become network-ready with a usable TUN device within 120 seconds."
+
+if [[ "$MEDIA_STORAGE_MODE" == host ]]; then
+    info "Verifying the expected media filesystem inside CT $CTID..."
+    pct exec "$CTID" -- env EXPECTED_MEDIA_TOKEN="$STORAGE_TOKEN" MEDIA_MOUNTPOINT="$MEDIA_MOUNTPOINT" bash -c '
+        set -Eeuo pipefail
+        actual=$(cat "$MEDIA_MOUNTPOINT/.media-stack-storage" 2>/dev/null || true)
+        [[ "$actual" == "$EXPECTED_MEDIA_TOKEN" ]] ||
+            { echo "Expected media filesystem is not mounted at $MEDIA_MOUNTPOINT." >&2; exit 1; }
+        test -d "$MEDIA_MOUNTPOINT/torrents"
+        test -d "$MEDIA_MOUNTPOINT/media"
+    '
+    install_host_media_guard
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 info "Installing the minimal transfer/PTY tools inside CT $CTID..."
@@ -306,6 +475,10 @@ pct set "$CTID" --protection 1
 CT_IP=$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}')
 CT_MAC=$(pct config "$CTID" | sed -n 's/^net0:.*hwaddr=\([^,]*\).*/\1/p')
 ok "Media Stack is running exclusively inside CT $CTID (${CT_IP:-IP unavailable})."
+if [[ "$MEDIA_STORAGE_MODE" == host ]]; then
+    ok "Media data is stored on $HOST_DATA_PATH and exposed inside the LXC as $MEDIA_MOUNTPOINT."
+    info "Docker will refuse to start in CT $CTID if the expected host media filesystem is missing or replaced."
+fi
 printf '\nManagement:\n'
 [[ "$NETWORK_MODE" != dhcp ]] || printf '  DHCP reservation: reserve MAC %s for CT %s\n' "${CT_MAC:-unavailable}" "$CTID"
 printf '  Enter LXC:       pct enter %s\n' "$CTID"
