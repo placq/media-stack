@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
-# This script runs on the Proxmox VE host. It creates an unprivileged LXC,
-# passes through the required devices, optionally bind-mounts an existing
-# host filesystem for media, and launches install_media.sh inside the LXC.
+# Runs on the Proxmox VE host. Creates an unprivileged Debian LXC, passes the
+# devices needed by Gluetun/Jellyfin, optionally attaches media storage and then
+# executes install_media.sh inside the guest. Docker never runs on the PVE host.
 
 set -Eeuo pipefail
 umask 077
 
-readonly PROVISIONER_VERSION="4.0.0"
+readonly PROVISIONER_VERSION="5.0.0"
 readonly PROJECT_REPOSITORY="placq/media-stack"
 readonly MEDIA_MOUNTPOINT="/opt/media-stack/data"
 readonly DEFAULT_HOST_MEDIA_PATH="/srv/media"
@@ -24,28 +24,28 @@ warn() { printf '%b[WARN]%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 die() { printf '%b[ERROR]%b %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 
 usage() {
-    cat <<'EOF'
+    cat <<'USAGE'
 Media Stack LXC provisioner (run on a Proxmox VE host)
 
 Usage:
   bash proxmox_lxc.sh
   bash proxmox_lxc.sh --help
 
-The script creates a new unprivileged Debian 13 LXC and then runs the media
-installer inside that LXC. It never runs Docker or media services on the
-Proxmox host itself.
+Creates an unprivileged Debian 13 LXC for the media stack. The guest gets:
+  - nesting/keyctl for Docker
+  - /dev/net/tun for Gluetun/ProtonVPN
+  - optional /dev/dri/renderD128 for Jellyfin hardware transcoding
+  - optional dedicated media storage
 
-Media storage can be:
-  host     an already-mounted host filesystem/directory such as /srv/media
-  proxmox  a new Proxmox-managed volume
-  none     no separate media storage; data remains inside the LXC rootfs
+Media storage modes:
+  host     bind-mount an already-mounted host filesystem/directory
+  proxmox  create a Proxmox-managed mount-point volume
+  none     keep /data inside the LXC root filesystem
 
-For "host", the provisioner refuses to use a path backed by the Proxmox root
-filesystem. It creates a storage sentinel, prepares the standard media
-directories for UID/GID 1000 inside the unprivileged LXC, tests write access
-and hardlinks, and installs a Docker startup guard so a missing/wrong media
-filesystem cannot silently receive downloads on the system disk.
-EOF
+The "host" mode refuses paths backed by the Proxmox root filesystem, validates
+UID/GID mapping and hardlinks, writes a storage sentinel and installs a Docker
+startup guard. This prevents a missing media disk from silently filling rootfs.
+USAGE
 }
 
 case "${1:-}" in
@@ -56,10 +56,10 @@ esac
 
 [[ $EUID -eq 0 ]] || die "Run this script as root on the Proxmox VE host."
 [[ -t 0 ]] || die "An interactive Proxmox shell is required; do not pipe this script to bash."
-if ! command -v pveversion >/dev/null || ! command -v pct >/dev/null || ! command -v pveam >/dev/null; then
-    die "This is not a Proxmox VE host (pveversion/pct/pveam are missing)."
-fi
-[[ -e /dev/net/tun ]] || die "The Proxmox host has no /dev/net/tun device."
+for cmd in pveversion pct pveam pvesm pvesh; do
+    command -v "$cmd" >/dev/null || die "Missing Proxmox command: $cmd"
+done
+[[ -c /dev/net/tun ]] || die "The Proxmox host has no /dev/net/tun character device."
 
 mkdir -p /run/lock
 exec 8>/run/lock/media-stack-lxc-provisioner.lock
@@ -93,7 +93,7 @@ prompt() {
 
 yes_no() {
     local variable=$1 label=$2 default=${3:-yes} answer suffix
-    if [[ "$default" == yes ]]; then suffix=Y/n; else suffix=y/N; fi
+    [[ "$default" == yes ]] && suffix=Y/n || suffix=y/N
     read -r -p "$label ($suffix): " answer
     case "$answer" in
         [Yy]|[Yy][Ee][Ss]) printf -v "$variable" yes ;;
@@ -120,9 +120,8 @@ valid_ipv4() {
     IFS=. read -r -a octets <<< "$address"
     ((${#octets[@]} == 4)) || return 1
     for octet in "${octets[@]}"; do
-        if [[ ! "$octet" =~ ^[0-9]{1,3}$ ]] || ((10#$octet > 255)); then
-            return 1
-        fi
+        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+        ((10#$octet <= 255)) || return 1
     done
 }
 
@@ -137,11 +136,8 @@ validate_host_media_path() {
     backing_target=$(findmnt -T "$path" -n -o TARGET --first 2>/dev/null || true)
     backing_source=$(findmnt -T "$path" -n -o SOURCE --first 2>/dev/null || true)
     backing_fstype=$(findmnt -T "$path" -n -o FSTYPE --first 2>/dev/null || true)
-
-    [[ -n "$backing_target" && -n "$backing_source" ]] ||
-        die "Unable to determine the filesystem backing $path."
-    [[ "$backing_target" != "/" ]] ||
-        die "$path is currently backed by the Proxmox root filesystem. Mount the media disk first."
+    [[ -n "$backing_target" && -n "$backing_source" ]] || die "Unable to determine the filesystem backing $path."
+    [[ "$backing_target" != / ]] || die "$path is backed by the Proxmox root filesystem. Mount the media disk first."
     [[ -w "$path" ]] || die "Host media path is not writable by root: $path"
 
     HOST_MEDIA_BACKING_TARGET=$backing_target
@@ -151,18 +147,12 @@ validate_host_media_path() {
 
 prepare_host_media_path() {
     local path=$1 test_source test_target
-    command -v setpriv >/dev/null ||
-        die "setpriv is required on the Proxmox host (normally provided by util-linux)."
+    command -v setpriv >/dev/null || die "setpriv is required on the Proxmox host (util-linux)."
 
     info "Preparing media directories on $path without recursively changing existing files..."
     install -d -m 0775 -o "$MEDIA_HOST_UID" -g "$MEDIA_HOST_GID" \
-        "$path/torrents" \
-        "$path/torrents/movies" \
-        "$path/torrents/tv" \
-        "$path/torrents/incomplete" \
-        "$path/media" \
-        "$path/media/movies" \
-        "$path/media/tv"
+        "$path/torrents" "$path/torrents/movies" "$path/torrents/tv" "$path/torrents/incomplete" \
+        "$path/media" "$path/media/movies" "$path/media/tv"
 
     STORAGE_TOKEN=$(cat /proc/sys/kernel/random/uuid)
     printf '%s\n' "$STORAGE_TOKEN" > "$path/.media-stack-storage"
@@ -171,15 +161,12 @@ prepare_host_media_path() {
     test_source="$path/torrents/.media-stack-write-test-$$"
     test_target="$path/media/.media-stack-hardlink-test-$$"
     rm -f -- "$test_source" "$test_target"
-
-    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups \
-        -- touch "$test_source"; then
+    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups -- touch "$test_source"; then
         die "Mapped LXC UID $MEDIA_CONTAINER_UID (host UID $MEDIA_HOST_UID) cannot write to $path/torrents."
     fi
-    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups \
-        -- ln "$test_source" "$test_target"; then
+    if ! setpriv --reuid="$MEDIA_HOST_UID" --regid="$MEDIA_HOST_GID" --clear-groups -- ln "$test_source" "$test_target"; then
         rm -f -- "$test_source" "$test_target"
-        die "Hardlinks do not work between $path/torrents and $path/media. They must share one filesystem."
+        die "Hardlinks do not work between torrents and media. Keep both on one filesystem."
     fi
     rm -f -- "$test_source" "$test_target"
 }
@@ -187,7 +174,7 @@ prepare_host_media_path() {
 install_host_media_guard() {
     local escaped_token
     escaped_token=$(printf '%q' "$STORAGE_TOKEN")
-    info "Installing Docker startup guard for the host media filesystem..."
+    info "Installing Docker startup guard for the media filesystem..."
     pct exec "$CTID" -- bash -c "
         set -Eeuo pipefail
         install -d -m 0755 /usr/local/sbin /etc/systemd/system/docker.service.d
@@ -230,16 +217,16 @@ DEFAULT_ROOT_STORAGE=$(first_storage_for rootdir)
 [[ -n "$DEFAULT_ROOT_STORAGE" ]] || die "No active Proxmox storage supports LXC root directories."
 prompt ROOT_STORAGE "Root filesystem storage" "$DEFAULT_ROOT_STORAGE"
 storage_supports "$ROOT_STORAGE" rootdir || die "Storage $ROOT_STORAGE is not active or does not support rootdir content."
-prompt ROOT_DISK_GB "Root filesystem size in GiB" 32
-if [[ ! "$ROOT_DISK_GB" =~ ^[0-9]+$ ]] || ((ROOT_DISK_GB < 16)); then
-    die "Root disk must be at least 16 GiB."
+prompt ROOT_DISK_GB "Root filesystem size in GiB" 64
+if [[ ! "$ROOT_DISK_GB" =~ ^[0-9]+$ ]] || ((ROOT_DISK_GB < 24)); then
+    die "Root disk must be at least 24 GiB."
 fi
 
 prompt CORES "CPU cores" 4
 prompt MEMORY_MB "Memory in MiB" 8192
 prompt SWAP_MB "Swap in MiB" 512
-if [[ ! "$CORES" =~ ^[0-9]+$ ]] || ((CORES < 2)); then die "At least 2 CPU cores are required."; fi
-if [[ ! "$MEMORY_MB" =~ ^[0-9]+$ ]] || ((MEMORY_MB < 2048)); then die "At least 2048 MiB of memory is required."; fi
+[[ "$CORES" =~ ^[0-9]+$ ]] && ((CORES >= 2)) || die "At least 2 CPU cores are required."
+[[ "$MEMORY_MB" =~ ^[0-9]+$ ]] && ((MEMORY_MB >= 2048)) || die "At least 2048 MiB of memory is required."
 [[ "$SWAP_MB" =~ ^[0-9]+$ ]] || die "Swap must be a non-negative integer."
 
 prompt BRIDGE "Proxmox network bridge" vmbr0
@@ -247,15 +234,11 @@ ip link show "$BRIDGE" >/dev/null 2>&1 || die "Network bridge $BRIDGE does not e
 prompt NETWORK_MODE "IPv4 mode (dhcp/static)" dhcp
 NET0="name=eth0,bridge=${BRIDGE},firewall=1,ip6=auto"
 case "$NETWORK_MODE" in
-    dhcp)
-        NET0+=",ip=dhcp"
-        ;;
+    dhcp) NET0+=",ip=dhcp" ;;
     static)
         prompt IPV4_CIDR "LXC IPv4 address with prefix (for example 192.168.1.50/24)"
         prompt IPV4_GATEWAY "IPv4 gateway (for example 192.168.1.1)"
-        if [[ ! "$IPV4_CIDR" =~ ^(.+)/([0-9]|[12][0-9]|3[0-2])$ ]]; then
-            die "Invalid IPv4 CIDR."
-        fi
+        [[ "$IPV4_CIDR" =~ ^(.+)/([0-9]|[12][0-9]|3[0-2])$ ]] || die "Invalid IPv4 CIDR."
         valid_ipv4 "${BASH_REMATCH[1]}" || die "Invalid IPv4 CIDR."
         valid_ipv4 "$IPV4_GATEWAY" || die "Invalid IPv4 gateway."
         NET0+=",ip=${IPV4_CIDR},gw=${IPV4_GATEWAY}"
@@ -265,28 +248,19 @@ esac
 
 prompt VLAN_TAG "Optional VLAN tag (empty means untagged)" ""
 if [[ -n "$VLAN_TAG" ]]; then
-    if [[ ! "$VLAN_TAG" =~ ^[0-9]+$ ]] || ((VLAN_TAG < 1 || VLAN_TAG > 4094)); then
-        die "VLAN must be between 1 and 4094."
-    fi
+    [[ "$VLAN_TAG" =~ ^[0-9]+$ ]] && ((VLAN_TAG >= 1 && VLAN_TAG <= 4094)) || die "VLAN must be between 1 and 4094."
     NET0+=",tag=${VLAN_TAG}"
 fi
 
 DEFAULT_MEDIA_MODE=none
 if [[ -d "$DEFAULT_HOST_MEDIA_PATH" ]]; then
     DEFAULT_MEDIA_TARGET=$(findmnt -T "$DEFAULT_HOST_MEDIA_PATH" -n -o TARGET --first 2>/dev/null || true)
-    [[ -n "$DEFAULT_MEDIA_TARGET" && "$DEFAULT_MEDIA_TARGET" != "/" ]] && DEFAULT_MEDIA_MODE=host
+    [[ -n "$DEFAULT_MEDIA_TARGET" && "$DEFAULT_MEDIA_TARGET" != / ]] && DEFAULT_MEDIA_MODE=host
 fi
 
 prompt MEDIA_STORAGE_MODE "Media storage mode (host/proxmox/none)" "$DEFAULT_MEDIA_MODE"
-HOST_DATA_PATH=""
-HOST_MEDIA_BACKING_TARGET=""
-HOST_MEDIA_BACKING_SOURCE=""
-HOST_MEDIA_BACKING_FSTYPE=""
-DATA_STORAGE=""
-DATA_SIZE_GB=""
-DATA_BACKUP=no
-STORAGE_TOKEN=""
-
+HOST_DATA_PATH=""; HOST_MEDIA_BACKING_TARGET=""; HOST_MEDIA_BACKING_SOURCE=""; HOST_MEDIA_BACKING_FSTYPE=""
+DATA_STORAGE=""; DATA_SIZE_GB=""; DATA_BACKUP=no; STORAGE_TOKEN=""
 case "$MEDIA_STORAGE_MODE" in
     host)
         prompt HOST_DATA_PATH "Existing host media path" "$DEFAULT_HOST_MEDIA_PATH"
@@ -297,24 +271,18 @@ case "$MEDIA_STORAGE_MODE" in
         ;;
     proxmox)
         prompt DATA_STORAGE "Media volume storage" "$ROOT_STORAGE"
-        storage_supports "$DATA_STORAGE" rootdir ||
-            die "Storage $DATA_STORAGE is not active or does not support LXC volumes."
+        storage_supports "$DATA_STORAGE" rootdir || die "Storage $DATA_STORAGE is not active or does not support LXC volumes."
         prompt DATA_SIZE_GB "Media volume size in GiB" 500
-        if [[ ! "$DATA_SIZE_GB" =~ ^[0-9]+$ ]] || ((DATA_SIZE_GB < 20)); then
-            die "Media volume must be at least 20 GiB."
-        fi
+        [[ "$DATA_SIZE_GB" =~ ^[0-9]+$ ]] && ((DATA_SIZE_GB >= 20)) || die "Media volume must be at least 20 GiB."
         yes_no DATA_BACKUP "Include the media volume in Proxmox vzdump backups" no
         ;;
-    none)
-        ;;
-    *)
-        die "Media storage mode must be host, proxmox or none."
-        ;;
+    none) ;;
+    *) die "Media storage mode must be host, proxmox or none." ;;
 esac
 
 ENABLE_GPU=no
-if [[ -e /dev/dri/renderD128 ]]; then
-    yes_no ENABLE_GPU "Pass Intel/AMD render device to Jellyfin" yes
+if [[ -c /dev/dri/renderD128 ]]; then
+    yes_no ENABLE_GPU "Pass /dev/dri/renderD128 to Jellyfin for hardware transcoding" yes
 fi
 
 TEMPLATE_STORAGE=$(first_storage_for vztmpl)
@@ -326,26 +294,21 @@ printf '  New guest:       CT %s (%s), unprivileged Debian 13\n' "$CTID" "$HOSTN
 printf '  Resources:       %s cores, %s MiB RAM, %s MiB swap\n' "$CORES" "$MEMORY_MB" "$SWAP_MB"
 printf '  Root filesystem: %s:%s GiB\n' "$ROOT_STORAGE" "$ROOT_DISK_GB"
 printf '  Network:         %s via %s%s\n' "$NETWORK_MODE" "$BRIDGE" "${VLAN_TAG:+, VLAN $VLAN_TAG}"
-printf '  Required device: /dev/net/tun\n'
+printf '  VPN device:      /dev/net/tun (Gluetun)\n'
 [[ "$ENABLE_GPU" == yes ]] && printf '  GPU device:      /dev/dri/renderD128\n'
 case "$MEDIA_STORAGE_MODE" in
     host)
         printf '  Media storage:   host bind mount %s → %s\n' "$HOST_DATA_PATH" "$MEDIA_MOUNTPOINT"
-        printf '  Backing fs:      %s (%s, %s)\n' \
-            "$HOST_MEDIA_BACKING_SOURCE" "$HOST_MEDIA_BACKING_FSTYPE" "$HOST_MEDIA_BACKING_TARGET"
-        printf '  LXC data UID:    %s:%s → host %s:%s\n' \
-            "$MEDIA_CONTAINER_UID" "$MEDIA_CONTAINER_GID" "$MEDIA_HOST_UID" "$MEDIA_HOST_GID"
+        printf '  Backing fs:      %s (%s, %s)\n' "$HOST_MEDIA_BACKING_SOURCE" "$HOST_MEDIA_BACKING_FSTYPE" "$HOST_MEDIA_BACKING_TARGET"
+        printf '  LXC data UID:    %s:%s → host %s:%s\n' "$MEDIA_CONTAINER_UID" "$MEDIA_CONTAINER_GID" "$MEDIA_HOST_UID" "$MEDIA_HOST_GID"
         printf '  vzdump media:    no (bind mount)\n'
         ;;
     proxmox)
-        printf '  Media storage:   %s:%s GiB → %s (vzdump: %s)\n' \
-            "$DATA_STORAGE" "$DATA_SIZE_GB" "$MEDIA_MOUNTPOINT" "$DATA_BACKUP"
+        printf '  Media storage:   %s:%s GiB → %s (vzdump: %s)\n' "$DATA_STORAGE" "$DATA_SIZE_GB" "$MEDIA_MOUNTPOINT" "$DATA_BACKUP"
         ;;
-    none)
-        printf '  Media storage:   LXC root filesystem (no separate media volume)\n'
-        ;;
+    none) printf '  Media storage:   LXC root filesystem (no separate media volume)\n' ;;
 esac
-printf '  Proxmox host:    no Docker and no media services will be installed here\n\n'
+printf '  PVE host:        no Docker and no media services installed here\n\n'
 yes_no CONFIRM "Create this LXC and launch its internal installer" no
 [[ "$CONFIRM" == yes ]] || die "Cancelled before making changes."
 
@@ -354,10 +317,9 @@ pveam update
 TEMPLATE_NAME=$(pveam available --section system |
     awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|gz)$/ {print $2}' |
     sort -V | tail -n1)
-[[ -n "$TEMPLATE_NAME" ]] || die "No Debian 13 amd64 standard template was found in the Proxmox appliance catalog."
+[[ -n "$TEMPLATE_NAME" ]] || die "No Debian 13 amd64 standard template was found."
 TEMPLATE_REF="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
-if ! pveam list "$TEMPLATE_STORAGE" |
-    awk -v ref="$TEMPLATE_REF" '$1 == ref {found=1} END {exit !found}'; then
+if ! pveam list "$TEMPLATE_STORAGE" | awk -v ref="$TEMPLATE_REF" '$1 == ref {found=1} END {exit !found}'; then
     info "Downloading $TEMPLATE_NAME to $TEMPLATE_STORAGE..."
     pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"
 else
@@ -390,11 +352,7 @@ case "$MEDIA_STORAGE_MODE" in
         ;;
     proxmox)
         info "Allocating the media volume..."
-        if [[ "$DATA_BACKUP" == yes ]]; then
-            DATA_BACKUP_FLAG=1
-        else
-            DATA_BACKUP_FLAG=0
-        fi
+        [[ "$DATA_BACKUP" == yes ]] && DATA_BACKUP_FLAG=1 || DATA_BACKUP_FLAG=0
         pct set "$CTID" --mp0 "${DATA_STORAGE}:${DATA_SIZE_GB},mp=${MEDIA_MOUNTPOINT},backup=${DATA_BACKUP_FLAG}"
         ;;
 esac
@@ -407,14 +365,13 @@ fi
 info "Starting CT $CTID..."
 pct start "$CTID"
 
-info "Waiting for systemd and IPv4 connectivity inside the LXC..."
+info "Waiting for systemd, IPv4 connectivity and TUN inside the LXC..."
 READY=false
 for ((_attempt = 1; _attempt <= 60; _attempt++)); do
     if pct exec "$CTID" -- bash -c '
         state=$(systemctl is-system-running 2>/dev/null || true)
         [[ "$state" == running || "$state" == degraded ]] &&
-            ip -4 route show default | grep -q . &&
-            test -c /dev/net/tun
+            ip -4 route show default | grep -q . && test -c /dev/net/tun
     ' 2>/dev/null; then
         READY=true
         break
@@ -428,8 +385,7 @@ if [[ "$MEDIA_STORAGE_MODE" == host ]]; then
     pct exec "$CTID" -- env EXPECTED_MEDIA_TOKEN="$STORAGE_TOKEN" MEDIA_MOUNTPOINT="$MEDIA_MOUNTPOINT" bash -c '
         set -Eeuo pipefail
         actual=$(cat "$MEDIA_MOUNTPOINT/.media-stack-storage" 2>/dev/null || true)
-        [[ "$actual" == "$EXPECTED_MEDIA_TOKEN" ]] ||
-            { echo "Expected media filesystem is not mounted at $MEDIA_MOUNTPOINT." >&2; exit 1; }
+        [[ "$actual" == "$EXPECTED_MEDIA_TOKEN" ]] || { echo "Expected media filesystem is not mounted." >&2; exit 1; }
         test -d "$MEDIA_MOUNTPOINT/torrents"
         test -d "$MEDIA_MOUNTPOINT/media"
     '
@@ -437,12 +393,11 @@ if [[ "$MEDIA_STORAGE_MODE" == host ]]; then
 fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-info "Installing the minimal transfer/PTY tools inside CT $CTID..."
+info "Installing minimal transfer/PTY tools inside CT $CTID..."
 pct exec "$CTID" -- bash -c 'apt-get update && apt-get install -y ca-certificates curl util-linux'
 if [[ -f "$SCRIPT_DIR/install_media.sh" && -f "$SCRIPT_DIR/templates/compose.yaml" ]]; then
     info "Copying this checked-out project snapshot into the LXC..."
-    tar -czf "$TEMP_DIR/media-stack-source.tar.gz" \
-        -C "$SCRIPT_DIR" \
+    tar -czf "$TEMP_DIR/media-stack-source.tar.gz" -C "$SCRIPT_DIR" \
         install_media.sh update_stack.sh sync_transmission_port.sh media_stack.sh templates
     pct push "$CTID" "$TEMP_DIR/media-stack-source.tar.gz" /root/media-stack-source.tar.gz --perms 0600
     pct exec "$CTID" -- mkdir -p /root/media-stack-source
@@ -451,11 +406,9 @@ if [[ -f "$SCRIPT_DIR/install_media.sh" && -f "$SCRIPT_DIR/templates/compose.yam
 else
     info "Downloading one consistent project snapshot inside CT $CTID..."
     pct exec "$CTID" -- curl --fail --silent --show-error --location --retry 3 \
-        "https://github.com/${PROJECT_REPOSITORY}/archive/main.tar.gz" \
-        -o /root/media-stack-source.tar.gz
+        "https://github.com/${PROJECT_REPOSITORY}/archive/main.tar.gz" -o /root/media-stack-source.tar.gz
     pct exec "$CTID" -- mkdir -p /root/media-stack-source
-    pct exec "$CTID" -- tar -xzf /root/media-stack-source.tar.gz \
-        --strip-components=1 -C /root/media-stack-source
+    pct exec "$CTID" -- tar -xzf /root/media-stack-source.tar.gz --strip-components=1 -C /root/media-stack-source
     INSTALLER_PATH=/root/media-stack-source/install_media.sh
 fi
 
@@ -477,7 +430,7 @@ CT_MAC=$(pct config "$CTID" | sed -n 's/^net0:.*hwaddr=\([^,]*\).*/\1/p')
 ok "Media Stack is running exclusively inside CT $CTID (${CT_IP:-IP unavailable})."
 if [[ "$MEDIA_STORAGE_MODE" == host ]]; then
     ok "Media data is stored on $HOST_DATA_PATH and exposed inside the LXC as $MEDIA_MOUNTPOINT."
-    info "Docker will refuse to start in CT $CTID if the expected host media filesystem is missing or replaced."
+    info "Docker will refuse to start if the expected host media filesystem is missing or replaced."
 fi
 printf '\nManagement:\n'
 [[ "$NETWORK_MODE" != dhcp ]] || printf '  DHCP reservation: reserve MAC %s for CT %s\n' "${CT_MAC:-unavailable}" "$CTID"

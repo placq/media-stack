@@ -1,53 +1,43 @@
 # Media Stack dla Proxmox LXC
 
-Produkcyjny instalator kompletnego stacku multimedialnego. Główny skrypt jest
-uruchamiany **na serwerze Proxmox VE**: tworzy osobny, nieuprzywilejowany LXC z
-Debianem 13, przygotowuje urządzenia i uruchamia instalator aplikacji **wewnątrz
-tego LXC**.
+Powtarzalny instalator produkcyjnego stacku multimedialnego dla Proxmox VE.
+Główny skrypt uruchamia się na hoście Proxmox, tworzy **nieuprzywilejowany LXC z Debianem 13**, przygotowuje storage i urządzenia, a następnie instaluje Dockera oraz cały stack wyłącznie wewnątrz kontenera.
 
-Docker ani żadna aplikacja multimedialna nie są instalowane na hoście Proxmox.
+Projekt celowo zajmuje się tylko warstwą mediów. Zdalny dostęp, reverse proxy i inne elementy infrastruktury sieciowej są konfigurowane poza tym LXC.
 
 ## Co powstaje
 
 ```text
-Proxmox VE host
-└── nieuprzywilejowany LXC „media”
+Proxmox VE
+└── LXC media (unprivileged, Debian 13)
     ├── Docker Engine + Compose
-    ├── Gluetun → ProtonVPN → Transmission
-    ├── Radarr, Sonarr, Prowlarr, Bazarr
-    ├── Jellyfin i Seerr
+    ├── Gluetun → ProtonVPN
+    │   └── Transmission
+    ├── Sonarr
+    ├── Radarr
+    ├── Prowlarr
+    ├── Bazarr
+    ├── Jellyfin
+    ├── Seerr
     ├── opcjonalny FlareSolverr
-    ├── opcjonalny Newt → Pangolin
-    ├── opcjonalny Tailscale
-    ├── automatyczne spięcie aplikacji ARR
-    ├── synchronizacja portu ProtonVPN → Transmission
+    ├── automatyczne spięcie *Arr + Bazarr
+    ├── synchronizacja forwarded port ProtonVPN → Transmission
+    ├── diagnostyka storage/VPN/iGPU/usług
     └── opóźnione aktualizacje z backupem i rollbackiem
 ```
 
-Provisioner może również przekazać urządzenie renderujące Intel/AMD do Jellyfin
-i utworzyć osobny, zarządzany przez Proxmox wolumin na media.
+## Założenia
 
-## Najszybsza instalacja
+- Proxmox VE jako host.
+- Płatny ProtonVPN z obsługą port forwardingu.
+- **WireGuard jest domyślnym i zalecanym protokołem VPN.**
+- OpenVPN pozostaje dostępny jako fallback.
+- Media i downloady powinny znajdować się na jednym filesystemie, aby Sonarr/Radarr mogły używać hardlinków.
+- Jellyfin może dostać `/dev/dri/renderD128` do sprzętowego transkodowania Intel/AMD.
 
-### 1. Przygotuj dane
+## Instalacja
 
-Przed startem warto mieć:
-
-- płatne konto ProtonVPN z port forwardingiem;
-- dla zalecanego WireGuard: klucz `PrivateKey` z konfiguracji ProtonVPN
-  wygenerowanej z włączonym NAT-PMP;
-- albo osobny login i hasło OpenVPN z panelu ProtonVPN — nie dane konta;
-- opcjonalnie endpoint, ID i sekret Newt z Pangolin;
-- opcjonalnie konto Tailscale;
-- adresację sieci: DHCP z rezerwacją lub statyczny IPv4;
-- decyzję, na którym storage Proxmox mają znajdować się system i media.
-
-OpenVPN wymaga sufiksu `+pmp`; instalator dodaje go sam i nie dubluje, jeśli już
-jest obecny.
-
-### 2. Uruchom provisioner na hoście Proxmox
-
-Zaloguj się do powłoki **hosta Proxmox jako root** i pobierz skrypt do pliku:
+Na hoście Proxmox jako `root`:
 
 ```bash
 installer=$(mktemp)
@@ -56,274 +46,230 @@ bash "$installer"
 rm -f "$installer"
 ```
 
-Nie uruchamiaj tego polecenia na laptopie ani stacji roboczej. Provisioner ma
-twardą kontrolę środowiska i zakończy się, jeśli nie wykryje hosta Proxmox VE.
+Nie używaj `curl | bash`. Provisioner wymaga interaktywnego terminala i pokazuje plan przed utworzeniem LXC.
 
-Nie używaj `curl | bash`. Provisioner celowo wymaga interaktywnego terminala i
-przed utworzeniem LXC wyświetla kompletny plan do zatwierdzenia.
+### Provisioner pyta tylko o rzeczy, których nie da się bezpiecznie zgadnąć
 
-Skrypt poprosi o:
+1. CT ID i hostname;
+2. storage LXC;
+3. CPU/RAM/swap;
+4. DHCP lub statyczny IPv4 i opcjonalny VLAN;
+5. gdzie mają leżeć media;
+6. opcjonalne przekazanie iGPU;
+7. dane ProtonVPN;
+8. login do Transmission;
+9. czy uruchomić FlareSolverr;
+10. opcjonalny zewnętrzny katalog backupu.
 
-1. nowy CT ID i hostname;
-2. storage oraz rozmiar dysku systemowego;
-3. CPU, RAM i swap;
-4. bridge, DHCP/statyczny IPv4 i opcjonalny VLAN;
-5. opcjonalny osobny wolumin `/opt/media-stack/data`;
-6. czy ten wolumin ma wejść do backupów `vzdump`;
-7. opcjonalne przekazanie iGPU;
-8. ostateczne potwierdzenie utworzenia LXC.
+Domyślny rootfs LXC to **64 GiB**. Dane multimedialne mogą być osobnym woluminem Proxmox albo istniejącym filesystemem hosta.
 
-Następnie automatycznie:
+## VPN i Transmission
 
-- odświeży katalog `pveam` i pobierze najnowszy szablon Debian 13;
-- utworzy nowy, nieuprzywilejowany LXC;
-- włączy `nesting=1` i `keyctl=1` wymagane przez Docker;
-- przekaże `/dev/net/tun` wymagany przez Gluetun i Tailscale;
-- uruchomi LXC i poczeka na systemd, sieć oraz TUN;
-- przeniesie do LXC jeden spójny snapshot projektu;
-- uruchomi wewnętrzny kreator usług.
+Domyślnie instalator wybiera **WireGuard**. Należy podać `PrivateKey` z konfiguracji ProtonVPN przygotowanej do port forwardingu.
 
-Druga seria pytań widoczna w tym samym terminalu dotyczy już wyłącznie
-konfiguracji wewnątrz LXC: VPN, Pangolin, Transmission, Tailscale, FlareSolverr,
-backupu zewnętrznego oraz transkodowania sprzętowego.
+Transmission nie ma własnego namespace sieciowego:
 
-Po udanej instalacji CT otrzymuje ochronę Proxmox przed przypadkowym usunięciem.
-
-## Ważne decyzje
-
-### Sieć
-
-Najprościej wybrać DHCP i ustawić w routerze rezerwację dla MAC nowego LXC.
-Można też od razu podać statyczny IPv4. Panele Dockera są wiązane tylko z
-loopbackiem i konkretnym adresem LAN, dlatego nie są przypadkowo publikowane na
-każdym interfejsie.
-
-Jeśli adres LXC później się zmieni:
-
-```bash
-pct exec CTID -- media-stack repair-ip
+```text
+Transmission
+    │
+    └── network_mode: service:gluetun
+                        │
+                        └── ProtonVPN
 ```
 
-Polecenie wykryje nowy adres, atomowo zmieni `.env`, odtworzy bindingi i w razie
-błędu przywróci poprzednią konfigurację.
+Dzięki temu Transmission korzysta bezpośrednio z sieci Gluetun. Forwarded port jest pobierany w pierwszej kolejności z control API Gluetun, a dla zgodności z serią v3 dostępny jest fallback do pliku statusowego. Port jest następnie ustawiany przez uwierzytelnione RPC Transmission.
 
-### Storage
+OpenVPN jest obsługiwany jako fallback i używa osobnych danych OpenVPN ProtonVPN. Instalator automatycznie dodaje wymagany sufiks `+pmp`, jeśli go brakuje.
 
-Provisioner może utworzyć osobny wolumin Proxmox zamontowany jako
-`/opt/media-stack/data`. Dla NAS lub istniejącego bind mountu najlepiej najpierw
-utworzyć LXC provisionerem bez woluminu danych, zatrzymać go, dodać świadomie
-mapowany mount i dopiero wewnątrz LXC ponownie uruchomić `install_media.sh`.
+## Storage i hardlinki
 
-W nieuprzywilejowanym LXC UID 1000 jest mapowany na UID 101000 hosta Proxmox.
-Instalator testuje realny zapis jako użytkownik mediów i zatrzymuje się z jasnym
-błędem, jeśli mapowanie jest niepoprawne. Nie wykonuje rekurencyjnego `chown` na
-całej istniejącej bibliotece.
+Wszystkie aplikacje widzą jedno drzewo `/data`:
 
-Katalogi pobierania i bibliotek są częścią jednego drzewa `/data`, a instalator
-sprawdza możliwość tworzenia hardlinków.
+```text
+/data
+├── torrents
+│   ├── incomplete
+│   ├── movies
+│   └── tv
+└── media
+    ├── movies
+    └── tv
+```
 
-### VPN
+Taki układ pozwala Sonarr/Radarr importować pliki przez hardlink zamiast kopiować je między osobnymi mountami.
 
-WireGuard jest domyślnym zaleceniem ze względu na mniejszy narzut. Obsługiwany
-jest również OpenVPN. W obu wariantach Transmission używa bezpośrednio
-przestrzeni sieciowej Gluetun (`network_mode: service:gluetun`), więc utrata VPN
-odcina mu wyjście zamiast przełączać ruch na zwykły interfejs LXC.
+Dla istniejącego filesystemu hosta provisioner:
 
-Losowy port przydzielony przez ProtonVPN jest co minutę odczytywany z Gluetun i
-ustawiany przez uwierzytelnione API Transmission. Skrypt nie parsuje logów i nie
-wymaga ręcznej zmiany portu po reconnectcie.
+- odmawia użycia ścieżki znajdującej się na rootfs Proxmoxa;
+- mapuje UID/GID nieuprzywilejowanego LXC;
+- sprawdza faktyczny zapis jako użytkownik aplikacji;
+- wykonuje test hardlinka;
+- zapisuje sentinel identyfikujący właściwy filesystem;
+- dodaje `ExecStartPre` do Dockera, który blokuje start, jeśli właściwy dysk zniknie lub pod mountpointem pojawi się inny filesystem.
 
-### Dostęp zdalny
+To zapobiega przypadkowemu zapisywaniu filmów na dysku systemowym po awarii mounta.
 
-Pangolin i Tailscale są niezależne i opcjonalne:
+## Co konfiguruje się automatycznie
 
-- Pangolin publikuje deklaratywnie tylko Jellyfin oraz Seerr;
-- Newt czyta metadane kontenerów przez ograniczony Docker Socket Proxy, nie przez
-  bezpośrednio zamontowane gniazdo Dockera;
-- panele administracyjne nie mają etykiet publicznych;
-- Tailscale Serve udostępnia prywatne endpointy HTTPS dla wszystkich paneli.
-
-## Model dostępu
-
-| Usługa | LAN | Tailscale | Pangolin publiczny |
-| --- | :---: | :---: | :---: |
-| Jellyfin | Tak | Tak | Tak |
-| Seerr | Tak | Tak | Tak, domyślnie z SSO |
-| Transmission | Tak | Tak | Nie |
-| Radarr | Tak | Tak | Nie |
-| Sonarr | Tak | Tak | Nie |
-| Prowlarr | Tak | Tak | Nie |
-| Bazarr | Tak | Tak | Nie |
-| FlareSolverr | Nie | Nie | Nie |
-
-Nie przekierowuj tych portów na routerze. Publiczny dostęp powinien przechodzić
-wyłącznie przez Pangolin, a administracja zdalna przez polityki Tailscale.
-
-## Co jest konfigurowane automatycznie
-
-Po pierwszym starcie `media-stack configure` używa bieżących schematów API
-aplikacji, zamiast polegać na sztywnym JSON-ie konkretnej wersji. Operacja jest
-idempotentna i ustawia:
+Po pierwszym starcie `media-stack configure` ustawia idempotentnie:
 
 - `/data/media/movies` jako root folder Radarr;
 - `/data/media/tv` jako root folder Sonarr;
-- Transmission jako download client obu aplikacji;
-- kategorię `movies` dla Radarr i `tv` dla Sonarr;
-- pełną synchronizację Prowlarr z Radarr i Sonarr;
-- wewnętrzne adresy kontenerów bez Remote Path Mappings.
+- Transmission jako download client Radarr i Sonarr;
+- kategorię `movies` dla Radarr;
+- kategorię `tv` dla Sonarr;
+- Prowlarr → Radarr z `fullSync`;
+- Prowlarr → Sonarr z `fullSync`;
+- Bazarr → Sonarr wraz z API key;
+- Bazarr → Radarr wraz z API key.
 
-Ręcznie pozostają czynności wymagające decyzji użytkownika: konto i biblioteki
-Jellyfin, logowanie Seerr, profile jakości, indexery oraz ewentualny proxy
-FlareSolverr.
-
-Jeśli automatyczne spięcie wykonało się zanim aplikacje były gotowe, można je
-bezpiecznie powtórzyć:
+Instalator wywołuje tę konfigurację sam po pierwszym uruchomieniu. Polecenie można bezpiecznie powtarzać:
 
 ```bash
-pct exec CTID -- media-stack configure
+media-stack configure
 ```
 
-## Zarządzanie z hosta Proxmox
+### Co nadal wymaga decyzji użytkownika
 
-```bash
-# stan kontenerów i adresy
-pct exec CTID -- media-stack status
+Tego projekt nie zgaduje, ponieważ są to dane konta albo preferencje:
 
-# pełna diagnostyka: TUN, storage, hardlinki, healthchecki, VPN i timery
-pct exec CTID -- media-stack doctor
+- utworzenie pierwszego konta Jellyfin;
+- wybór bibliotek i ustawień odtwarzania w Jellyfin;
+- pierwsze logowanie i wybór serwera biblioteki w Seerr;
+- indexery w Prowlarr;
+- profile jakości i polityka pobierania;
+- języki/profil napisów w Bazarr.
 
-# logi jednej usługi
-pct exec CTID -- media-stack logs gluetun
+Poza tym połączenia pomiędzy aplikacjami są wykonywane automatycznie.
 
-# spójny backup konfiguracji przy zatrzymanym stacku
-pct exec CTID -- media-stack backup
+## iGPU / sprzętowe transkodowanie Jellyfin
 
-# wejście do LXC
-pct enter CTID
-```
+Jeśli host ma `/dev/dri/renderD128`, provisioner proponuje przekazanie tego urządzenia do LXC. Do Jellyfin trafia tylko render node, a kontener otrzymuje właściwy GID urządzenia.
 
-Przydatne polecenia już wewnątrz LXC:
+`media-stack doctor` sprawdza wtedy:
+
+- czy render node istnieje w LXC;
+- czy widzi go kontener Jellyfin;
+- czy `vainfo` z pakietu Jellyfin FFmpeg potrafi otworzyć urządzenie DRM.
+
+Po instalacji nadal należy w panelu Jellyfin wybrać sprzętową akcelerację właściwą dla sprzętu.
+
+## Zarządzanie
+
+W LXC:
 
 ```bash
 media-stack status
 media-stack doctor
-cd /opt/media-stack && docker compose ps
-systemctl status media-stack-update.timer
-systemctl status media-stack-port-sync.timer
-journalctl -u media-stack-update.service -n 100 --no-pager
-journalctl -u media-stack-port-sync.service -n 100 --no-pager
+media-stack configure
+media-stack backup
+media-stack logs gluetun
+media-stack logs jellyfin
 ```
 
-## Aktualizacje i rollback
+Z hosta Proxmox:
 
-Timer nocny pobiera metadane nowych obrazów, ale kandydat musi pozostać
-niezmieniony przez siedem dni. Grupy zależnych usług dojrzewają razem:
+```bash
+pct exec CTID -- media-stack status
+pct exec CTID -- media-stack doctor
+pct exec CTID -- media-stack configure
+pct enter CTID
+```
 
-- Gluetun + Transmission;
-- Newt + Docker Socket Proxy;
-- pozostałe aplikacje osobno.
+Jeśli adres IP LXC zmieni się mimo rezerwacji DHCP:
 
-Przed wdrożeniem stack jest zatrzymywany, a konfiguracja i sekrety trafiają do
-sprawdzonego archiwum. Po aktualizacji wymagane są działające kontenery,
-healthchecki, endpointy HTTP, brak pętli restartów i aktywny port ProtonVPN przez
-pełne 60 sekund. Niepowodzenie przywraca poprzednie obrazy i konfigurację.
+```bash
+media-stack repair-ip
+```
 
-Opcjonalny backup NAS zapisuje także oczekiwane źródło i punkt montowania.
-Zmiana lub zniknięcie mountu zatrzymuje backup/aktualizację zamiast zapisać dane
-na lokalnym katalogu pod pustym mountpointem.
+Polecenie wykryje aktualny adres, odtworzy bindingi Compose i w razie błędu przywróci poprzednią konfigurację.
 
-Lokalnie przechowywanych jest pięć backupów i dwa obrazy rollbacku na usługę;
-na zewnętrznym filesystemie dziesięć backupów.
+## Diagnostyka
+
+`media-stack doctor` sprawdza między innymi:
+
+- `/dev/net/tun`;
+- Docker i model Compose;
+- aktualny binding LAN;
+- zapis UID/GID do storage;
+- hardlinki między `torrents` i `media`;
+- stan i healthcheck wszystkich aktywnych kontenerów;
+- czy Transmission naprawdę dzieli namespace sieciowy Gluetun;
+- endpointy HTTP aplikacji;
+- logowanie do Transmission;
+- różnicę między publicznym IP LXC i VPN;
+- forwarded port ProtonVPN;
+- spięcie Bazarr → Sonarr/Radarr;
+- iGPU/Jellyfin, jeśli HWA jest włączone;
+- timery aktualizacji i synchronizacji portu;
+- tożsamość zewnętrznego filesystemu backupowego.
+
+## Aktualizacje
+
+`media-stack-update.timer` uruchamia nocny check. Nowy obraz nie jest wdrażany od razu: kandydat musi pozostać niezmieniony przez domyślnie **7 dni**.
+
+Zależne usługi aktualizują się razem, np. Gluetun + Transmission. Przed wdrożeniem powstaje backup konfiguracji i tagi rollbacku. Po zmianie wymagane są:
+
+- działające kontenery;
+- poprawne healthchecki;
+- działające endpointy HTTP;
+- brak pętli restartów;
+- poprawny forwarded port VPN przez okres stabilizacji.
+
+Jeśli walidacja się nie powiedzie, poprzednia konfiguracja i obrazy są automatycznie przywracane.
+
+## Backup
+
+`media-stack backup` tworzy spójny backup konfiguracji przy zatrzymanym stacku. Obejmuje konfiguracje aplikacji, sekrety, Compose i skrypty zarządzające, ale **nie bibliotekę filmów/seriali**.
+
+Opcjonalny katalog zewnętrzny jest zapamiętywany wraz z tożsamością źródła i mountpointu. Jeśli mount zniknie albo zostanie podmieniony, backup kończy się błędem zamiast zapisywać pod pustym katalogiem na rootfs.
+
+Backup tego stacku jest ochroną konfiguracji. Kopie danych ważnych dla całego homelabu powinny być realizowane niezależnie na poziomie infrastruktury.
 
 ## Sekrety
 
-Hasła nie trafiają do `.env`, wygenerowanej instrukcji ani środowiska
-kontenerów tam, gdzie upstream obsługuje pliki:
+Sekrety nie są wpisywane bezpośrednio do Compose:
 
 ```text
 /opt/media-stack/secrets/
-├── proton_openvpn_user              # tylko dla OpenVPN
-├── proton_openvpn_password          # tylko dla OpenVPN
-├── proton_wireguard_private_key     # tylko dla WireGuard
+├── proton_wireguard_private_key
+├── proton_openvpn_user
+├── proton_openvpn_password
 ├── transmission_user
 └── transmission_password
 ```
 
-Pliki mają tryb `0600`. Gluetun i LinuxServer Transmission korzystają z Docker
-Compose secrets. Newt używa własnego pliku konfiguracyjnego `0600`.
-
-## Instalacja w istniejącym LXC
-
-Jeśli LXC został już utworzony ręcznie, na hoście Proxmox ustaw co najmniej:
-
-```bash
-pct set CTID --features nesting=1,keyctl=1
-pct set CTID --dev0 /dev/net/tun
-pct stop CTID
-pct start CTID
-```
-
-Następnie wejdź do kontenera (`pct enter CTID`) i wykonaj:
-
-```bash
-apt-get update
-apt-get install -y ca-certificates curl
-installer=$(mktemp)
-curl -fsSL https://raw.githubusercontent.com/placq/media-stack/main/install_media.sh -o "$installer"
-bash "$installer"
-rm -f "$installer"
-```
-
-`install_media.sh` jest bezpieczny do ponownego uruchomienia: zachowuje puste
-sekrety z poprzedniej konfiguracji, waliduje nowy Compose przed podmianą i przy
-błędzie odtwarza poprzednie pliki.
-
-## Diagnostyka awarii provisionera
-
-Provisioner nigdy nie usuwa automatycznie częściowo utworzonego LXC. Jeśli etap
-wewnętrzny się nie powiedzie:
-
-```bash
-pct config CTID
-pct enter CTID
-bash /root/media-stack-source/install_media.sh
-```
-
-Sprawdź przede wszystkim:
-
-```bash
-test -c /dev/net/tun && echo TUN_OK
-ip route
-systemctl status docker --no-pager
-cd /opt/media-stack && docker compose logs --tail=100 gluetun
-```
-
-CT ma po udanej instalacji włączoną ochronę. Przed świadomym usunięciem trzeba ją
-wyłączyć:
-
-```bash
-pct set CTID --protection 0
-```
+Aktywny wariant VPN wykorzystuje pliki sekretów. Niepotrzebne sekrety drugiego protokołu są usuwane podczas rekonfiguracji.
 
 ## Pliki projektu
 
 | Plik | Rola |
 | --- | --- |
-| `proxmox_lxc.sh` | provisioner uruchamiany wyłącznie na hoście Proxmox |
-| `install_media.sh` | instalator uruchamiany wyłącznie wewnątrz LXC |
-| `templates/compose*.yaml` | testowalne profile stacku |
-| `media_stack.sh` | status, doctor, konfiguracja ARR, backup i naprawa IP |
-| `sync_transmission_port.sh` | synchronizacja ProtonVPN → Transmission |
-| `update_stack.sh` | opóźnione aktualizacje, backup, healthcheck i rollback |
+| `proxmox_lxc.sh` | tworzy i zabezpiecza LXC na hoście Proxmox |
+| `install_media.sh` | instaluje stack wewnątrz LXC |
+| `templates/compose.yaml` | główny model usług |
+| `templates/compose.wireguard.yaml` | domyślna konfiguracja WireGuard |
+| `templates/compose.openvpn.yaml` | fallback OpenVPN |
+| `templates/compose.gpu.yaml` | passthrough render node do Jellyfin |
+| `media_stack.sh` | status, doctor, automatyczna konfiguracja, backup i naprawa IP |
+| `sync_transmission_port.sh` | synchronizacja forwarded port → Transmission |
+| `update_stack.sh` | opóźnione aktualizacje, test stabilności i rollback |
+| `tests/validate.sh` | statyczne testy kontraktów i wariantów Compose |
 
-Projekt opiera konfigurację LXC na oficjalnym `pct`, Dockera na podpisanym
-repozytorium APT Docker CE, Tailscale na podpisanym repozytorium APT, a składnię
-Pangolin na deklaratywnych blueprintach/etykietach Newt.
+## Walidacja zmian
 
-Dokumentacja referencyjna: [Proxmox `pct`](https://pve.proxmox.com/pve-docs/pct.1.html),
-[Docker Engine na Debianie](https://docs.docker.com/engine/install/debian/),
-[Tailscale w nieuprzywilejowanym LXC](https://tailscale.com/kb/1130/lxc-unprivileged/),
-[ProtonVPN port forwarding](https://protonvpn.com/support/port-forwarding-manual-setup),
-[Gluetun dla ProtonVPN](https://github.com/qdm12/gluetun-wiki/blob/main/setup/providers/protonvpn.md),
-[Pangolin Blueprints](https://docs.pangolin.net/manage/blueprints) oraz
-[Docker dla Seerr](https://docs.seerr.dev/getting-started/docker/).
+Repo uruchamia w GitHub Actions:
+
+- `bash -n` dla skryptów;
+- renderowanie wariantów Compose;
+- testy niezmienników bezpieczeństwa;
+- ShellCheck.
+
+Lokalnie:
+
+```bash
+bash tests/validate.sh
+shellcheck --severity=warning \
+  proxmox_lxc.sh install_media.sh media_stack.sh \
+  update_stack.sh sync_transmission_port.sh
+```
