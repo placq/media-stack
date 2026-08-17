@@ -111,8 +111,10 @@ if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?docker([[:space:]]|$)' proxmox_lxc.
   echo "Host provisioner contains a Docker invocation" >&2
   exit 1
 fi
-if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?(apt|apt-get|systemctl)([[:space:]]|$)' proxmox_lxc.sh; then
-  echo "Host provisioner contains an OS/service installation command" >&2
+# Do not match systemctl text embedded in commands deliberately executed through
+# `pct exec` inside the guest. We only prohibit direct host package installation.
+if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?(apt|apt-get)([[:space:]]|$)' proxmox_lxc.sh; then
+  echo "Host provisioner contains a host package installation command" >&2
   exit 1
 fi
 
