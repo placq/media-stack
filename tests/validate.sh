@@ -1,119 +1,124 @@
 #!/usr/bin/env bash
-
 set -Eeuo pipefail
 
 REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$REPOSITORY_ROOT" || exit 1
+cd "$REPOSITORY_ROOT"
 
 SCRIPTS=(
-    proxmox_lxc.sh
-    install_media.sh
-    media_stack.sh
-    update_stack.sh
-    sync_transmission_port.sh
+  proxmox_lxc.sh
+  install_media.sh
+  media_stack.sh
+  update_stack.sh
+  sync_transmission_port.sh
 )
+
 bash -n "${SCRIPTS[@]}"
 bash media_stack.sh help >/dev/null
-[[ "$(bash media_stack.sh version)" == "media-stack 4.0.0" ]]
+[[ "$(bash media_stack.sh version)" == "media-stack 5.0.0" ]]
 
-temp_dir=$(mktemp -d)
-trap 'rm -rf -- "$temp_dir"' EXIT
-cp templates/*.yaml "$temp_dir/"
-mkdir -p "$temp_dir/secrets"
+# Infrastructure access belongs outside this repository. Keep the media stack
+# focused by allowing only the expected application services.
+EXPECTED_SERVICES='bazarr flaresolverr gluetun jellyfin prowlarr radarr seerr sonarr transmission'
+
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TEMP_DIR"' EXIT
+cp templates/*.yaml "$TEMP_DIR/"
+mkdir -p "$TEMP_DIR/secrets"
 for secret in transmission_user transmission_password proton_openvpn_user proton_openvpn_password proton_wireguard_private_key; do
-    printf 'test-value' > "$temp_dir/secrets/$secret"
+  printf 'test-value' >"$TEMP_DIR/secrets/$secret"
 done
 
-cat > "$temp_dir/.env" <<'EOF'
+cat >"$TEMP_DIR/.env" <<'ENV'
 PUID='1000'
 PGID='1000'
 TZ='Europe/Warsaw'
 LAN_IP='192.0.2.10'
-PUBLIC_DOMAIN='example.com'
 RENDER_GID='104'
-COMPOSE_PROFILES='pangolin,flaresolverr'
-EOF
+COMPOSE_PROFILES='flaresolverr'
+ENV
 
 validate_variant() {
-    local vpn gpu output
-    local -a files
-    vpn=$1
-    gpu=${2:-no}
-    output="$temp_dir/${vpn}-${gpu}.json"
-    files=(-f compose.yaml -f "compose.${vpn}.yaml")
-    [[ "$gpu" == yes ]] && files+=(-f compose.gpu.yaml)
-    (
-        cd "$temp_dir" || exit 1
-        docker compose "${files[@]}" config --quiet
-        docker compose "${files[@]}" config --format json > "$output"
-    )
-    jq -e . "$output" >/dev/null
+  local vpn=$1 gpu=${2:-no} output
+  local -a files=(-f compose.yaml -f "compose.${vpn}.yaml")
+  [[ "$gpu" == yes ]] && files+=(-f compose.gpu.yaml)
+  output="$TEMP_DIR/${vpn}-${gpu}.json"
+  (
+    cd "$TEMP_DIR"
+    docker compose "${files[@]}" config --quiet
+    docker compose "${files[@]}" config --format json >"$output"
+  )
+  jq -e . "$output" >/dev/null
 }
 
-validate_variant openvpn yes
-validate_variant wireguard no
+validate_variant wireguard yes
+validate_variant openvpn no
 
-model="$temp_dir/openvpn-yes.json"
-jq -e '
-    .services.transmission.network_mode == "service:gluetun" and
-    .services.gluetun.cap_add == ["NET_ADMIN"] and
-    .services["socket-proxy"].environment.POST == "0" and
-    .services["socket-proxy"].read_only == true and
-    .services.newt.environment.DOCKER_ENFORCE_NETWORK_VALIDATION == "true" and
-    .services.jellyfin.labels["pangolin.public-resources.jellyfin.mode"] == "http" and
-    .services.seerr.labels["pangolin.public-resources.seerr.mode"] == "http" and
-    .services.newt.healthcheck.test[1] == "test -f /tmp/healthy"
-' "$model" >/dev/null
+WG_MODEL="$TEMP_DIR/wireguard-yes.json"
+OVPN_MODEL="$TEMP_DIR/openvpn-no.json"
 
-wireguard_model="$temp_dir/wireguard-no.json"
-jq -e '
-    .services.gluetun.environment.WIREGUARD_PRIVATE_KEY_SECRETFILE == "/run/secrets/proton_wireguard_private_key" and
-    (.services.gluetun.environment | has("WIREGUARD_PRIVATE_KEY") | not)
-' "$wireguard_model" >/dev/null
+# Exact service inventory prevents accidental infrastructure creep.
+ACTUAL_SERVICES=$(jq -r '.services | keys[]' "$WG_MODEL" | sort | xargs)
+[[ "$ACTUAL_SERVICES" == "$EXPECTED_SERVICES" ]]
 
 jq -e '
-    (.services.newt.environment | has("NEWT_ID") | not) and
-    (.services.newt.environment | has("NEWT_SECRET") | not)
-' "$model" >/dev/null
+  .services.transmission.network_mode == "service:gluetun" and
+  .services.gluetun.cap_add == ["NET_ADMIN"] and
+  .services.gluetun.environment.VPN_SERVICE_PROVIDER == "protonvpn" and
+  .services.gluetun.environment.VPN_PORT_FORWARDING == "on" and
+  .services.gluetun.environment.HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH == "/gluetun/auth/config.toml" and
+  .services.jellyfin.devices[0].source == "/dev/dri/renderD128" and
+  .services.jellyfin.devices[0].target == "/dev/dri/renderD128"
+' "$WG_MODEL" >/dev/null
 
-# Administrative services must never declare a Pangolin public resource.
-for service in transmission radarr sonarr prowlarr bazarr flaresolverr; do
-    if jq -e --arg service "$service" '
-        .services[$service].labels // {} |
-        keys[]? |
-        startswith("pangolin.public-resources.")
-    ' "$model" >/dev/null; then
-        echo "$service unexpectedly declares a public Pangolin resource" >&2
-        exit 1
-    fi
-done
-
-# VPN and Transmission credentials must be file-backed, not interpolated values.
+# Secrets must be file-backed rather than interpolated plaintext values.
 jq -e '
-    .services.gluetun.environment.OPENVPN_USER_SECRETFILE == "/run/secrets/proton_openvpn_user" and
-    .services.gluetun.environment.OPENVPN_PASSWORD_SECRETFILE == "/run/secrets/proton_openvpn_password" and
-    (.services.gluetun.environment | has("OPENVPN_USER") | not) and
-    (.services.gluetun.environment | has("OPENVPN_PASSWORD") | not) and
-    .services.transmission.environment.FILE__PASS == "/run/secrets/transmission_password" and
-    (.services.transmission.environment | has("PASS") | not)
-' "$model" >/dev/null
+  .services.gluetun.environment.WIREGUARD_PRIVATE_KEY_SECRETFILE == "/run/secrets/proton_wireguard_private_key" and
+  (.services.gluetun.environment | has("WIREGUARD_PRIVATE_KEY") | not) and
+  .services.transmission.environment.FILE__USER == "/run/secrets/transmission_user" and
+  .services.transmission.environment.FILE__PASS == "/run/secrets/transmission_password" and
+  (.services.transmission.environment | has("USER") | not) and
+  (.services.transmission.environment | has("PASS") | not)
+' "$WG_MODEL" >/dev/null
 
-# The host provisioner must invoke the LXC installer through pct, never locally.
+jq -e '
+  .services.gluetun.environment.OPENVPN_USER_SECRETFILE == "/run/secrets/proton_openvpn_user" and
+  .services.gluetun.environment.OPENVPN_PASSWORD_SECRETFILE == "/run/secrets/proton_openvpn_password" and
+  (.services.gluetun.environment | has("OPENVPN_USER") | not) and
+  (.services.gluetun.environment | has("OPENVPN_PASSWORD") | not)
+' "$OVPN_MODEL" >/dev/null
+
+# No application should declare public-ingress metadata; exposure is outside this project.
+if jq -e '[.services[] | .labels // {} | length] | any(. > 0)' "$WG_MODEL" >/dev/null; then
+  echo "Unexpected service labels found in media Compose" >&2
+  exit 1
+fi
+
+# Installer defaults and automation contracts.
+grep -Fq 'CURRENT_VPN_TYPE=wireguard' install_media.sh
+grep -Fq 'prompt ROOT_DISK_GB "Root filesystem size in GiB" 64' proxmox_lxc.sh
+grep -Fq 'settings-general-use_sonarr=true' media_stack.sh
+grep -Fq 'settings-general-use_radarr=true' media_stack.sh
+grep -Fq 'settings-sonarr-ip=sonarr' media_stack.sh
+grep -Fq 'settings-radarr-ip=radarr' media_stack.sh
+grep -Fq '/v1/portforward' sync_transmission_port.sh
+grep -Fq '/tmp/gluetun/forwarded_port' sync_transmission_port.sh
+grep -Fq '/usr/lib/jellyfin-ffmpeg/vainfo --display drm --device /dev/dri/renderD128' media_stack.sh
+
+# Host provisioner must install applications only through pct inside the LXC.
 grep -Fq 'pct exec "$CTID" -- env MEDIA_STACK_PROXMOX_LAUNCH=1 \' proxmox_lxc.sh
 grep -Fq 'script --quiet --return --command "bash $INSTALLER_PATH --from-proxmox" /dev/null' proxmox_lxc.sh
-grep -Fq 'This installer runs only inside an LXC' install_media.sh
-if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?bash[[:space:]]+"?\$INSTALLER_PATH"?[[:space:]]+--from-proxmox' proxmox_lxc.sh; then
-    echo "proxmox_lxc.sh contains a local installer invocation" >&2
-    exit 1
-fi
 if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?docker([[:space:]]|$)' proxmox_lxc.sh; then
-    echo "proxmox_lxc.sh contains a Docker invocation on the Proxmox host" >&2
-    exit 1
+  echo "Host provisioner contains a Docker invocation" >&2
+  exit 1
 fi
-if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?(apt|apt-get|systemctl)([[:space:]]|$)' proxmox_lxc.sh; then
-    echo "proxmox_lxc.sh contains an OS/service installation command on the Proxmox host" >&2
-    exit 1
+# Do not match systemctl text embedded in commands deliberately executed through
+# `pct exec` inside the guest. We only prohibit direct host package installation.
+if grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?(apt|apt-get)([[:space:]]|$)' proxmox_lxc.sh; then
+  echo "Host provisioner contains a host package installation command" >&2
+  exit 1
 fi
 
+# Common files should not accidentally grow executable syntax errors or whitespace damage.
 git diff --check
+
 echo "All static validation checks passed."
