@@ -175,7 +175,9 @@ command_doctor() {
   fi
 
   puid=$(read_env PUID); pgid=$(read_env PGID)
-  # Test a media subdirectory: the root of a host bind mount may remain\n  # owned by the host root mapping and need not be directly writable.\n  storage_test="$STACK_DIR/data/torrents/incomplete/.doctor-write-test"
+  # Test a media subdirectory: the root of a host bind mount may remain
+  # owned by the host root mapping and need not be directly writable.
+  storage_test="$STACK_DIR/data/torrents/incomplete/.doctor-write-test"
   if setpriv --reuid="$puid" --regid="$pgid" --clear-groups touch "$storage_test" 2>/dev/null; then
     rm -f "$storage_test"; check_ok "Media UID:GID can write to data"
   else
