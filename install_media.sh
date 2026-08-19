@@ -253,10 +253,7 @@ PUID=$(id -u "$REAL_USER"); PGID=$(id -g "$REAL_USER"); TZ=$(cat /etc/timezone 2
 
 DIRS=(config/gluetun/auth config/transmission config/sonarr config/radarr config/prowlarr config/bazarr config/jellyfin config/seerr data/torrents/movies data/torrents/tv data/torrents/incomplete data/media/movies data/media/tv backups .update-state secrets)
 for d in "${DIRS[@]}"; do mkdir -p "$INSTALL_DIR/$d"; done
-for d in config/gluetun config/transmission config/sonarr config/radarr config/prowlarr config/bazarr config/jellyfin data data/torrents data/torrents/movies data/torrents/tv data/torrents/incomplete data/media data/media/movies data/media/tv; do
-  chown "$PUID:$PGID" "$INSTALL_DIR/$d" 2>/dev/null || die "Cannot assign $INSTALL_DIR/$d to UID:GID $PUID:$PGID; fix bind-mount mapping"
-  chmod 0775 "$INSTALL_DIR/$d"
-done
+# Do not chown the root of a host bind mount: in an unprivileged LXC it may\n# be owned by the host root mapping and is intentionally not chownable here.\n# The media subdirectories below are prepared and ownership-checked separately.\nfor d in config/gluetun config/transmission config/sonarr config/radarr config/prowlarr config/bazarr config/jellyfin data/torrents data/torrents/movies data/torrents/tv data/torrents/incomplete data/media data/media/movies data/media/tv; do\n  chown "$PUID:$PGID" "$INSTALL_DIR/$d" 2>/dev/null || die "Cannot assign $INSTALL_DIR/$d to UID:GID $PUID:$PGID; fix bind-mount mapping"\n  chmod 0775 "$INSTALL_DIR/$d"\ndone
 chown 1000:1000 "$INSTALL_DIR/config/seerr" 2>/dev/null || die "Cannot assign Seerr config to UID:GID 1000:1000"
 chmod 0750 "$INSTALL_DIR/config" "$INSTALL_DIR/secrets" "$INSTALL_DIR/.update-state"
 
