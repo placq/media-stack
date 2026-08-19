@@ -257,9 +257,7 @@ for d in "${DIRS[@]}"; do mkdir -p "$INSTALL_DIR/$d"; done
 chown 1000:1000 "$INSTALL_DIR/config/seerr" 2>/dev/null || die "Cannot assign Seerr config to UID:GID 1000:1000"
 chmod 0750 "$INSTALL_DIR/config" "$INSTALL_DIR/secrets" "$INSTALL_DIR/.update-state"
 
-PERMISSION_TEST="$INSTALL_DIR/data/.media-stack-write-test"
-runuser -u "$REAL_USER" -- touch "$PERMISSION_TEST" || die "UID $PUID cannot write to $INSTALL_DIR/data"
-rm -f "$PERMISSION_TEST"
+# Test a directory that the media user owns. The root of a host bind mount\n# may intentionally remain owned by the host root mapping.\nPERMISSION_TEST="$INSTALL_DIR/data/torrents/incomplete/.media-stack-write-test"\nrunuser -u "$REAL_USER" -- touch "$PERMISSION_TEST" || die "UID $PUID cannot write to $INSTALL_DIR/data/torrents/incomplete"\nrm -f "$PERMISSION_TEST"
 HARDLINK_SOURCE="$INSTALL_DIR/data/torrents/.hardlink-test"; HARDLINK_TARGET="$INSTALL_DIR/data/media/.hardlink-test"
 runuser -u "$REAL_USER" -- touch "$HARDLINK_SOURCE"
 runuser -u "$REAL_USER" -- ln "$HARDLINK_SOURCE" "$HARDLINK_TARGET" || { rm -f "$HARDLINK_SOURCE" "$HARDLINK_TARGET"; die "Hardlinks do not work between torrents and media; keep them on one filesystem"; }
