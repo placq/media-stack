@@ -327,22 +327,28 @@ else
 fi
 
 info "Creating unprivileged CT $CTID..."
-pct create "$CTID" "$TEMPLATE_REF" \
-    --arch amd64 \
-    --ostype debian \
-    --hostname "$HOSTNAME" \
-    --unprivileged 1 \
-    --features nesting=1,keyctl=1 \
-    --dev0 /dev/net/tun \
-    --cores "$CORES" \
-    --memory "$MEMORY_MB" \
-    --swap "$SWAP_MB" \
-    --rootfs "${ROOT_STORAGE}:${ROOT_DISK_GB}" \
-    --net0 "$NET0" \
-    --onboot 1 \
-    --start 0 \
-    --timezone host \
-    --description "Media Stack LXC managed by ${PROJECT_REPOSITORY}"
+(
+    # pct/lxc-usernsexec must be able to traverse the rootfs directory that it
+    # creates for an unprivileged container. Keep the restrictive process-wide
+    # umask for secrets, but use Proxmox's normal directory permissions here.
+    umask 022
+    pct create "$CTID" "$TEMPLATE_REF" \
+        --arch amd64 \
+        --ostype debian \
+        --hostname "$HOSTNAME" \
+        --unprivileged 1 \
+        --features nesting=1,keyctl=1 \
+        --dev0 /dev/net/tun \
+        --cores "$CORES" \
+        --memory "$MEMORY_MB" \
+        --swap "$SWAP_MB" \
+        --rootfs "${ROOT_STORAGE}:${ROOT_DISK_GB}" \
+        --net0 "$NET0" \
+        --onboot 1 \
+        --start 0 \
+        --timezone host \
+        --description "Media Stack LXC managed by ${PROJECT_REPOSITORY}"
+)
 CT_CREATED=true
 
 case "$MEDIA_STORAGE_MODE" in

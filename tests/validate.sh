@@ -96,6 +96,10 @@ fi
 # Installer defaults and automation contracts.
 grep -Fq 'CURRENT_VPN_TYPE=wireguard' install_media.sh
 grep -Fq 'prompt ROOT_DISK_GB "Root filesystem size in GiB" 64' proxmox_lxc.sh
+# The process-wide umask is intentionally strict, but pct create needs the
+# normal Proxmox directory permissions for unprivileged rootfs extraction.
+grep -Fq 'umask 022' proxmox_lxc.sh
+grep -Fq '    pct create "$CTID" "$TEMPLATE_REF" \\' proxmox_lxc.sh
 grep -Fq 'settings-general-use_sonarr=true' media_stack.sh
 grep -Fq 'settings-general-use_radarr=true' media_stack.sh
 grep -Fq 'settings-sonarr-ip=sonarr' media_stack.sh
