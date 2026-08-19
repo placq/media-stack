@@ -36,6 +36,8 @@ services:
       VPN_PORT_FORWARDING: "on"
       VPN_PORT_FORWARDING_PROVIDER: protonvpn
       VPN_PORT_FORWARDING_STATUS_FILE: /tmp/gluetun/forwarded_port
+      # Lower MTU keeps WireGuard reliable through nested LXC and Docker bridges.
+      WIREGUARD_MTU: "1280"
       HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /gluetun/auth/config.toml
       FIREWALL_INPUT_PORTS: "9091"
       UPDATER_PERIOD: 480h
