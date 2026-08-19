@@ -3,7 +3,10 @@ set -Eeuo pipefail
 umask 077
 
 readonly TOOL_VERSION="5.0.0"
-# Resolve the real script path so the /usr/local/sbin/media-stack symlink\n# still uses the installation directory for .env and stack data.\nSCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")\nSTACK_DIR=$(cd "$(dirname "$SCRIPT_PATH")" && pwd)
+# Resolve the real script path so the /usr/local/sbin/media-stack symlink
+# still uses the installation directory for .env and stack data.
+SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
+STACK_DIR=$(cd "$(dirname "$SCRIPT_PATH")" && pwd)
 ENV_FILE="$STACK_DIR/.env"
 
 if [[ -t 1 ]]; then
